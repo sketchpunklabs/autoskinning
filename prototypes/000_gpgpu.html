@@ -1,0 +1,104 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8" /><meta name="viewport" content="width=device-width, initial-scale=1.0" /><title></title></head>
+<style>canvas{ display:block; } body, html { padding:0px; margin:0px; width:100%; height:100%; }</style>
+<body><script src="../import-map.js"></script><script type="module"></script><script type="module">
+
+// #region IMPORTS
+import useThreeWebGL2, { THREE, useDarkScene, useVisualDebug } from '../lib/useThreeWebGL2.js';
+
+import { GLContext, GLShader, GLDataTexture } from '../lib/gl/index.js';
+// #endregion
+
+// #region MAIN
+let App   = useDarkScene( useThreeWebGL2() );
+let Ref   = {};
+let Debug;
+
+window.addEventListener( 'load', async _=>{
+    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    // Setup
+    App.sphericalLook( 0, 20, 20 );
+    Debug = await useVisualDebug( App );
+
+    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+    GLContext.init( App.renderer.getContext() );
+
+    const size  = App.getRenderSize();
+    const sh    = GLShader.forGPGPU( src );
+    // const dt    = GLDataTexture.asFloat32( 3, 2, 4 ).upload();
+    const dt    = GLDataTexture.asUint8( 3, 2, 4 ).upload();
+    
+    GPGPU.compute( sh, dt, size );
+
+    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    App.renderLoop();
+});
+// #endregion
+
+
+const src = `#version 300 es
+precision highp float;
+out vec4 outColor;
+
+void main() {
+    // outColor = vec4( gl_FragCoord.xy, 9.0, 10.0 ); // Float32 Data
+    outColor = vec4( gl_FragCoord.xy/255.0, 9.0/255.0, 10.0/255.0 ); // Uint8 Data
+}`;
+
+
+class GPGPU{
+    static frameBuffer = null;
+
+    static compute( sh, dt, viewPort ){
+        // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+        // Initialize
+        const gl = GLContext.ctx;
+        this.preCompute( sh, dt );
+
+        // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+        // Setup Shader
+        gl.useProgram( sh.prog );
+
+        // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+        // Execute
+        gl.drawArrays( gl.TRIANGLES, 0, 3 );  // FullScreen Triangle, just 3 vertices
+
+        // TEST - Read the Texture data back
+        
+        // Float32
+        // const results = new Float32Array( dt.colLen * dt.rowLen * 4 );
+        // gl.readPixels( 0, 0, dt.colLen, dt.rowLen, gl.RGBA, gl.FLOAT, results );
+        
+        // Uint8
+        const results = new Uint8Array( dt.colLen * dt.rowLen * 4 );
+        gl.readPixels( 0, 0, dt.colLen, dt.rowLen, gl.RGBA, gl.UNSIGNED_BYTE, results );
+
+        for( let i=0; i < results.length; i+=4 ){
+            console.log( Math.floor(results[i+0]), Math.floor(results[i+1]), results[i+2], results[i+3] );
+        }
+
+        // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+        // Cleanup
+        this.postCompute( viewPort );
+    }
+
+    static preCompute( sh, dt ){
+        const gl = GLContext.ctx;
+        if( !this.frameBuffer ) this.frameBuffer = gl.createFramebuffer();
+        
+        gl.viewport( 0, 0, dt.colLen, dt.rowLen );
+        gl.bindFramebuffer( gl.FRAMEBUFFER, this.frameBuffer );
+        gl.framebufferTexture2D( gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, dt.ref, 0 );
+    }
+
+    static postCompute( viewPort ){
+        const gl = GLContext.ctx;
+        
+        gl.useProgram( null );
+        gl.bindFramebuffer( gl.FRAMEBUFFER, null );
+        gl.viewport( 0, 0, viewPort[0], viewPort[1] );
+    }
+}
+
+
+</script></body></html>

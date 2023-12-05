@@ -1,0 +1,110 @@
+// VOXEL GEODESIC AUTO SKINNING
+WHITE PAPER   : http://www.delasa.net/data/sca2013_voxelization.pdf
+CPU PROTOTYPE : https://bitbucket.org/sketchpunk/sketchpunk.bitbucket.io/src/master/src/threejs/autoskinning/index.html
+
+Fill Voxel Volume : https://bitbucket.org/sketchpunk/sketchpunk.bitbucket.io/src/c036dfb4b5a93425220b4bb482c0e96e1edc77cf/src/threejs/autoskinning/oito/voxel/SolidVoxelizer.js#lines-108
+
+https://webglfundamentals.org/webgl/lessons/webgl-gpgpu.html
+
+Algorithm : Distance Computation
+input     : Character skeleton S and voxelized mesh V
+foreach bone bi of S do
+    // Initialize voxel distance values
+    foreach non-exterior voxel vi of V do
+        3 dvi = ∞;
+    end
+    
+    Create empty voxel queue Q;
+    
+    // Initialize bone voxels and add to queue.
+    foreach non-exterior voxel vi of V intersecting with bi do
+        dvi = 0;
+        Push vi to Q;
+    9 end
+
+    // Compute geodesic distances
+    while Q not empty do
+        Pop vi from Q;
+        foreach non-exterior voxel neighbor vj to vi do
+            dist = dvi + |pvi − pvj|;
+            if dvj > dist then
+                dvj = dist;
+                Push vj to Q;
+            end
+        end
+    end
+end
+
+step1_voxelizeMesh
+At the first stage, we need to figure all the voxel cells that intersect
+all the triangles of the mesh. The main idea:
+1. Loop Every Triangle
+2. Compute the Triangle's Bounding Box
+3. Using the BoundingBox, find the Range of voxels the triangle exist in.
+4. Test each voxel for BBOX-TRIANGLE Intersection.
+5. For Every Voxel that intersects a triangle, it's set as active|on in the chunk object.
+
+step2_boneVoxelIntersection
+1. Turn Bone Data to a collection of segments
+2. Use each segment as a ray to find every active voxel cell that the segment intersects.
+
+step3_voxelCrawler
+1. Assign a bone distance of zero for each voxel found.
+2. Use each bone's intersected voxel coordinates as the starting point for the Voxel Crawler which
+   will access all the active voxels and determine how far each one is from said bone. The idea is
+   like the Dijkstra's Shortest Path Algorithm.
+
+step4_computeBoneWeights
+1. Grab each vertex from the mesh
+2. Compute which voxel it exists in.
+3. In the Geodesic object, filter the 4 closest bones in the voxel.
+4. Compute the weight based on the vertex & voxel centroid & voxel distance
+5. Normalize the 4 weights.
+6. Do some extra filtering like removing bones with very little or near zero influence
+7. ReNormalize the Weights after the previous filtering
+8. With the remaining Weights, get the bone indices.
+
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+1. Voxelize Triangle Mesh
+Compute : GPGPU
+
+Inputs
+-- Triangles > DataTexture : Random Access Needed
+-- Voxel Chunk Uniforms
+
+Output : DataTexture RGBA32F - RGB = Normal, A = IsActive
+- True/False : Is it intersected
+- Triangle Normal : Needed for Volume Filling, 
+  Compute from tri points, no need to store in 
+  triangle datatexture
+
+Notes:
+- Each fragment call runs 1 voxel, test against 
+   all triangles till one is found.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+2. Voxel Volume Filling
+Compute: TransformFeedback
+
+Inputs
+- Voxel Chunk > DataTexture : Random Access Needed
+
+Outputs
+- True/False : Is voxel active
+
+Pseudo 
+for( v in voxels ){
+    if( v is active ) set true;
+    else{
+        // Test if its an inner voxel by looking for an exit
+        coord = calcCoord( voxelIndex );
+        for( coord.z to minZ ){
+            if( v @ coord is active ){
+                if( dot( FWD, Tri ) > -0.1 ) set true & break
+                else break; We hit an entry voxel instead of an exit one
+            }
+        }
+    }
+}
+
