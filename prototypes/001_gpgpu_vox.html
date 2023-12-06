@@ -1,0 +1,364 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8" /><meta name="viewport" content="width=device-width, initial-scale=1.0" /><title></title></head>
+<style>canvas{ display:block; } body, html { padding:0px; margin:0px; width:100%; height:100%; }</style>
+<body><script src="../import-map.js"></script><script type="module"></script><script type="module">
+
+// #region IMPORTS
+import useThreeWebGL2, { THREE, useDarkScene, useVisualDebug } from '../lib/useThreeWebGL2.js';
+
+import { GLContext, GPGPU, TransformFeedback, GLShader, GLDataTexture } from '../lib/gl/index.js';
+
+import VoxelChunk           from '../lib/VoxelChunk.js';
+import voxInstanceMaterial  from '../lib/material/voxInstanceMaterial.js';
+// #endregion
+
+// #region MAIN
+let App   = useDarkScene( useThreeWebGL2() );
+let Ref   = {};
+let Debug;
+
+window.addEventListener( 'load', async _=>{
+    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    // Setup
+    App.sphericalLook( 0, 20, 5 );
+    Debug = await useVisualDebug( App );
+
+    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    GLContext.init( App.renderer.getContext() );
+
+    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    // Load Shape
+    const geo       = useShape();
+    const gMin      = geo.boundingBox.min.toArray();
+    const gMax      = geo.boundingBox.max.toArray();
+
+    // Save triangle data to a DataTexture
+    const dtTri     = geoToDataTexture( geo, GLContext.ctx );
+
+    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    // Setup Voxel Grid
+    const vox       = new VoxelChunk().fitBound( gMin, gMax, 10, 1.01 );
+    const voxMesh   = VoxVisualizer.box( vox );
+    App.scene.add( voxMesh );
+    
+    console.log( 'Voxel Count', vox.count );
+    Debug.ln.box( vox.minBound, vox.maxBound, 0x00ffff );
+    // let cor=[0,0,0], mid=[0,0,0];
+    // for( let i=0; i < vox.count; i++ ){
+    //     vox.idxCoord( i, cor );
+    //     vox.coordMidPoint( cor, mid );
+    //     Debug.pnt.add( mid, 0x505050, 2 );
+    // }
+
+    // for( let i=0; i < vox.count; i++ ) vox.cells[i] = 1;
+    // for( let i=0; i < vox.count; i++ ) vox.cells[i] = (Math.random() > 0.5)?1:0;
+
+    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    // Compute Triangle-Voxel Intersection, Write results to a DataTexture
+    const dtVox     = GLDataTexture.asFloat32( 1, vox.count, 4 ).upload();
+    
+    const shTriVox  = GLShader.forGPGPU( GP_VOX_TRI )
+        .setUniform( 'vCellSize', vox.cellSize )
+        .setUniform( 'vXZCount', vox.xzCount )
+        .setUniform( 'vDimension', vox.dimension )
+        .setUniform( 'vMin', vox.minBound )
+        .setUniform( 'triCnt', dtTri.rowLen )
+        .setUniform( 'texTri', dtTri.ref );
+
+    GPGPU.compute( shTriVox, dtVox, App.getRenderSize() );
+
+    // const f32 = GPGPU.readFloat32( dtVox );
+    // for( let i=0; i < f32.length; i+=4 ) console.log( f32[i+0],f32[i+1],f32[i+2],f32[i+3] );
+    
+    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    // Copy Voxel results in the DataTexture to a GLBuffer in the InstancedMesh
+    App.render();
+
+    const shCopy = GLShader.forTF( TP_TEX_COPY )
+        .setUniform( 'tex', dtVox.ref );
+
+    TransformFeedback.compute( App.renderer, shCopy, { vox: voxMesh.geometry.attributes.inst } );
+
+    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    App.renderLoop();
+});
+// #endregion
+
+
+function useShape(){
+    const geo   = new THREE.SphereGeometry( 1, 5, 5 ); 
+    geo.computeBoundingBox();
+    
+    const mat1  = new THREE.MeshPhongMaterial( { color: 0x00ffff } ); 
+    const mesh1 = new THREE.Mesh( geo, mat1 ); 
+    App.scene.add( mesh1 );
+
+    return geo;
+}
+
+function geoToDataTexture( geo, gl ){
+    const verts     = geo.attributes.position.array;
+    const indie     = geo.index.array;
+    const triCnt    = indie.length / 3;
+    const dt        = GLDataTexture.asFloat32( 3, triCnt, 3 ); // 3xN Texture using RGB
+
+    let a, b, c, ii;
+    for( let i=0; i < triCnt; i++ ){
+        ii = i * 3;
+        a  = indie[ ii+0 ] * 3;
+        b  = indie[ ii+1 ] * 3;
+        c  = indie[ ii+2 ] * 3;
+
+        dt.setRaw(
+            i,
+            verts[ a+0 ],
+            verts[ a+1 ],
+            verts[ a+2 ],
+            verts[ b+0 ],
+            verts[ b+1 ],
+            verts[ b+2 ],
+            verts[ c+0 ],
+            verts[ c+1 ],
+            verts[ c+2 ],
+        );
+    }
+
+    dt.upload();
+    return dt;
+}
+
+
+class VoxVisualizer{
+
+    static box( vox ){
+        const box  = new THREE.BoxGeometry( 1, 1, 1 ); 
+        const iGeo = new THREE.InstancedBufferGeometry();
+        iGeo.setIndex( Array.from( box.index.array ) ); // 3Js flips out, need to pass JS Array
+        iGeo.setAttribute( 'position', box.attributes.position );
+        iGeo.setAttribute( 'normal', box.attributes.normal );
+        iGeo.setAttribute( 'inst', new THREE.InstancedBufferAttribute( vox.cells, 1 ) );
+        iGeo.instanceCount = vox.count;
+
+        const mat  = voxInstanceMaterial( vox );
+        const mesh = new THREE.Mesh( iGeo, mat );
+        return mesh;
+    }
+
+}
+
+
+const GP_VOX_TRI = `#version 300 es
+precision highp float;
+
+// #region DATA
+uniform float vCellSize;    // Size of a voxel cell
+uniform int   vXZCount;     // How many voxels in one level
+uniform ivec3 vDimension;   // Voxel chunk size, how many voxels in each axis
+uniform vec3  vMin;         // Min Bounding for Voxel Chunk
+uniform int   triCnt;       // How many triangles to test
+
+// Datatexture storing 3xN RGB Float32 Data
+// uniform highp sampler2D texTri; // Doesn't crash compiler but uniform gets treated as its not being used
+uniform sampler2D texTri;
+
+out vec4 outColor;
+// #endregion
+
+// #region INTERSECTION ////////////////////////////////////////////////////////////////
+
+// Original : https://gist.github.com/yomotsu/d845f21e2e1eb49f647f
+// Prototype Javascript Version : https://bitbucket.org/sketchpunk/sketchpunk.bitbucket.io/src/master/src/threejs/autoskinning/oito/geometry/Intersect.js
+
+// int triangle_aabb( vec3 a, vec3 b, vec3 c, vec3 minBox, vec3 maxBox ){
+int triangle_aabb( vec3 a, vec3 b, vec3 c, vec3 center, float halfLen ){
+    float p0;
+    float p1;
+    float p2;
+    float r;
+    
+    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    // Compute box center and extents of AABoundingBox (if not already given in that format)
+    
+    // vec3 center = minBox * 0.5 + maxBox * 0.5;
+    // vec3 extents = maxBox - center;
+    vec3 extents = vec3( halfLen );
+
+    // Translate triangle as conceptually moving AABB to origin
+    vec3 v0 = a - center;
+    vec3 v1 = b - center;
+    vec3 v2 = c - center;
+    
+    // Compute edge vectors for triangle
+    vec3 f0 = v1 - v0;
+    vec3 f1 = v2 - v1;
+    vec3 f2 = v0 - v2;
+    
+    // Test axes a00..a22 ( category 3 )
+    vec3 a00 = vec3(      0, -f0[2],  f0[1] );
+    vec3 a01 = vec3(      0, -f1[2],  f1[1] ); 
+    vec3 a02 = vec3(      0, -f2[2],  f2[1] ); 
+    vec3 a10 = vec3(  f0[2],      0, -f0[0] ); 
+    vec3 a11 = vec3(  f1[2],      0, -f1[0] ); 
+    vec3 a12 = vec3(  f2[2],      0, -f2[0] ); 
+    vec3 a20 = vec3( -f0[1],  f0[0],      0 ); 
+    vec3 a21 = vec3( -f1[1],  f1[0],      0 ); 
+    vec3 a22 = vec3( -f2[1],  f2[0],      0 );
+
+    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    // Axis Testing
+    
+    /*
+    p0 = v0.dot( a00 );
+    p1 = v1.dot( a00 );
+    p2 = v2.dot( a00 );
+    r  = extents[1] * Math.abs( f0[2] ) + extents[2] * Math.abs( f0[1] );
+    if( Math.max( -Math.max( p0, p1, p2 ), Math.min( p0, p1, p2 ) ) > r ) return false;
+    */
+    
+    vec3[9] aryAxis = vec3[9]( a00, a01, a02, a10, a11, a12, a20, a21, a22 ); // Axis Point
+    vec3[9] aryEdge = vec3[9]( f0, f1, f2, f0, f1, f2, f0, f1, f2 ); // Triangle Vector Length Edges
+    int[9] aryAA    = int[9]( 1, 1, 1, 0, 0, 0, 0, 0, 0 );  // First Axis Component
+    int[9] aryBB    = int[9]( 2, 2, 2, 2, 2, 2, 1, 1, 1 );  // Second Axis Component
+
+    for ( int i=0; i < 9; i++ ){
+        // -----------------------------------
+        // Project all 3 vertices of the triangle onto the seperating axis
+        p0 = dot( v0, aryAxis[i] );
+        p1 = dot( v1, aryAxis[i] );
+        p2 = dot( v2, aryAxis[i] );
+
+        // -----------------------------------
+        // Project the aabb onto the seperating axis
+        r = extents[ aryAA[i] ] * 
+            abs( aryEdge[i][ aryBB[i] ] ) + 
+            extents[ aryBB[i] ] *
+            abs( aryEdge[i][ aryAA[i] ] );
+
+        // -----------------------------------
+        // Axis is a separating axis, then false
+        // Actual test, basically see if either of the most extreme of the triangle points intersects r.
+        // Points of the projected triangle are outside the projected half-length of the aabb
+        // the axis is seperating and we can exit.
+        if( max( 
+             -max( p0, max( p1, p2 ) ), 
+              min( p0, min( p1, p2 ) ) 
+          ) > r 
+        ) return 0;
+    }
+
+    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    // Test the three axes corresponding to the face normals of AABB b (category 1). Exit if...
+    // ... [-extents.x, extents.x] and [min(v0.x,v1.x,v2.x), max(v0.x,v1.x,v2.x)] do not overlap
+
+    if( max( v0.x, max( v1.x, v2.x ) ) < -extents.x || 
+        min( v0.x, min( v1.x, v2.x ) ) > extents.x
+    ) return 0;
+
+    // ... [-extents.y, extents.y] and [min(v0.y,v1.y,v2.y), max(v0.y,v1.y,v2.y)] do not overlap
+    if( max( v0.y, max( v1.y, v2.y ) ) < -extents.y || 
+        min( v0.y, min( v1.y, v2.y ) ) > extents.y
+    ) return 0;
+
+    // ... [-extents.z, extents.z] and [min(v0.z,v1.z,v2.z), max(v0.z,v1.z,v2.z)] do not overlap    
+    if( max( v0.z, max( v1.z, v2.z ) ) < -extents.z || 
+        min( v0.z, min( v1.z, v2.z ) ) > extents.z
+    ) return 0;
+
+    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    // Intersection AABB-Plane
+    // Test separating axis corresponding to triangle face normal (category 2)
+    // Face Normal is -ve as Triangle is clockwise winding (and XNA uses -z for into screen)
+
+    vec3 planeNorm   = normalize( cross( f1, f0 ) );
+    float planeConst = dot( planeNorm, a );
+
+    r = extents[0] * abs( planeNorm[0] ) +
+        extents[1] * abs( planeNorm[1] ) +
+        extents[2] * abs( planeNorm[2] );
+
+    float s = abs( dot( planeNorm, center ) - planeConst );
+    return ( s <= r )? 1 : 0;
+}
+// #endregion
+
+// #region TRI DATA //////////////////////////////////////////////////////////////////
+
+struct Tri{
+    vec3 a;
+    vec3 b;
+    vec3 c;
+};
+
+Tri getTriAt( int i ){
+    return Tri(
+        texelFetch( texTri, ivec2( 0, i ), 0 ).rgb,
+        texelFetch( texTri, ivec2( 1, i ), 0 ).rgb,
+        texelFetch( texTri, ivec2( 2, i ), 0 ).rgb
+    );
+}
+
+// #endregion
+
+// #region VOXEL ////////////////////////////////////////////////////////////////
+
+// Compute center point at voxel coordinate
+vec3 coordMidPoint( ivec3 coord ){
+    return vec3( coord ) * vCellSize + vMin + ( vCellSize * 0.5 );
+}
+
+// Convert Index to Voxel Coordinate
+ivec3 idxCoord( int i ){
+    int y   = i / vXZCount;            // How Many Y Levels Can We Get?
+    int xz  = i - ( y * vXZCount );    // Subtract Y Levels from total, To get remaining Layer
+    int z   = xz / vDimension.x;       // How many rows in the last layer can we get?
+    int x   = xz - z * vDimension.x;   // With all the rows removed, how many left
+    return ivec3( x, y, z );
+}
+// #endregion
+
+void main() {
+    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    // Voxel Position
+    int   idx     = int( gl_FragCoord.y ); // Single Pixel width, so Y is row index
+    ivec3 coord   = idxCoord( idx );
+    vec3 voxMid   = coordMidPoint( coord );
+
+    // outColor = vec4( gl_FragCoord.xy, 9.0, 10.0 ); // Float32 Data
+    // outColor = vec4( gl_FragCoord.xy/255.0, 9.0/255.0, 10.0/255.0 ); // Uint8 Data
+    // outColor = vec4( gl_FragCoord.xy, 0.0, triCnt );
+    // outColor = vec4( coord, idx);
+
+    // Tri t     = getTriAt( 0 );
+    // outColor = vec4( t.c, 0);
+
+    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    Tri t;
+    int isHit;
+    float halfLen = vCellSize * 0.5;
+
+    for( int i=0; i < triCnt; i++ ){
+        t     = getTriAt( i );
+        isHit = triangle_aabb( t.a, t.b, t.c, voxMid, halfLen );
+
+        if( isHit == 1 ){
+            outColor = vec4( normalize( cross( t.b-t.a, t.c-t.a ) ), 1.0 );
+            return;
+        }
+    }
+
+    outColor = vec4( 0.0 );
+}`;
+
+
+const TP_TEX_COPY = `#version 300 es
+// precision highp float;
+
+uniform sampler2D tex;
+flat out uint vox;
+
+void main(){
+    vec4 px = texelFetch( tex, ivec2( 0, gl_VertexID ), 0 );
+    vox     = ( px.a > 0.5 )? 1u : 0u;
+}`;
+
+
+</script></body></html>
