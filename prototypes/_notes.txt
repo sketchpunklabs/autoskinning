@@ -168,6 +168,17 @@ for( v in voxels ){
 }
 
 
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+4. Heat Spread
+
+- Set initial heat on any voxel that intersects a bone
+- Each iteration, compute distance of its 6 neigbors
+  
+
+
+
+
+
 function buildSkeletonMesh( arm, geo, sWeights, sIndices ){
     //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
     // Convert Armature to THREE.Skeleton

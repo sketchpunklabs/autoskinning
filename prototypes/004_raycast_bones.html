@@ -1,0 +1,138 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8" /><meta name="viewport" content="width=device-width, initial-scale=1.0" /><title></title></head>
+<style>canvas{ display:block; } body, html { padding:0px; margin:0px; width:100%; height:100%; }</style>
+<body><script src="../import-map.js"></script><script type="module"></script><script type="module">
+
+// #region IMPORTS
+import useThreeWebGL2, { THREE, useDarkScene, useVisualDebug } from '../lib/useThreeWebGL2.js';
+
+// import { GLContext, GLShader, GLDataTexture } from '../lib/gl/index.js';
+
+import { GLTFLoader } from 'tp/GLTFLoader.js';
+// #endregion
+
+// #region MAIN
+let App   = useDarkScene( useThreeWebGL2() );
+let Ref   = {};
+let Debug;
+
+window.addEventListener( 'load', async _=>{
+    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    // Setup
+    App.sphericalLook( 90, 20, 2, [0,0.3,0] );
+    Debug = await useVisualDebug( App );
+
+    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    const gltf = await gltfLoaderAsync( './assets/war_sword.gltf' );
+    Ref.shape  = gltf.scene.children[0];
+    Ref.shape.material.side = THREE.DoubleSide; // To Raycast Exit, need to set material to double sided... Eh?
+    
+    // Ref.shape.position.z = 0.5;
+    App.scene.add( Ref.shape );
+
+    Ref.caster = new THREE.Raycaster();
+
+    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    const points = [
+        cast( [0.5,-0.15,0] ),
+        cast( [0.5,0.085,0] ),
+        cast( [0.5,0.285,0.01] ),
+        cast( [0.5,0.485,0] ),
+        cast( [0.5,0.665,-0.05] ),
+        cast( [0.5,0.765,-0.15] ),
+    ];
+
+    buildBones( points );
+
+    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    App.renderLoop();
+});
+
+function gltfLoaderAsync( url ){
+    return new Promise( ( resolve, reject )=>{
+        const loader = new GLTFLoader();
+        loader.load( url, resolve, null, reject );
+    });
+}
+
+// #endregion
+
+function cast( pos, dir=[-1,0,0] ){
+    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    const scl = 1;
+    const end = [
+        dir[0] * scl + pos[0],
+        dir[1] * scl + pos[1],
+        dir[2] * scl + pos[2],
+    ];
+    Debug.pnt.add( pos, 0x00ffff, 1 );
+    Debug.ln.add( pos, end, 0x00ffff );
+
+    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    const v0 = new THREE.Vector3().fromArray( pos );
+    const v1 = new THREE.Vector3().fromArray( dir );
+    Ref.caster.set( v0, v1 );
+
+    const hits = Ref.caster.intersectObject( Ref.shape, true );
+
+    if( hits.length > 0 ){
+        const entry = hits[0].point.toArray();
+        const exit  = hits[1].point.toArray();
+        const mid   = [
+            entry[0] * 0.5 + exit[0] * 0.5,
+            entry[1] * 0.5 + exit[1] * 0.5,
+            entry[2] * 0.5 + exit[2] * 0.5,
+        ];
+
+        Debug.pnt.add( entry, 0x00ff00, 0.5 );
+        Debug.pnt.add( exit, 0xff0000, 0.5 );
+
+        return mid;
+    }
+}
+
+function buildBones( points ){
+    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    // Build Bone Heirarchy
+    const bones = [];
+
+    let b;  // Bone
+    let pb; // Previous Bone
+    let pp; // Previous Point
+    for( const p of points ){
+        bones.push( ( b = new THREE.Bone() ) );
+
+        if( pp ){
+            // To LocalSpace
+            b.position.x = p[0] - pp[0];
+            b.position.y = p[1] - pp[1];
+            b.position.z = p[2] - pp[2];
+            
+            // Attach as child
+            pb.add( b );
+        }else{
+            b.position.x = p[0];
+            b.position.y = p[1];
+            b.position.z = p[2];
+        }
+
+        pb = b;
+        pp = p;
+    }
+
+
+    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    const skel  = new THREE.Skeleton( bones );
+    const bView = new THREE.SkeletonHelper( bones[0] );
+    App.scene.add( bView ); 
+
+    // Skeleton Helper DOES NOT work unless skeleton has been
+    // bound to a skinned mesh... MEH, Ossos doesn't do that :)
+    const mat  = new THREE.MeshPhongMaterial( { flatShading:true } );
+    const mesh = new THREE.SkinnedMesh( Ref.shape.geometry, mat );
+    mesh.add( skel.bones[ 0 ] );
+    mesh.position.z = -0.5; // Move for photos
+    mesh.bind( skel );
+}
+
+
+</script></body></html>
