@@ -4,6 +4,8 @@ CPU PROTOTYPE : https://bitbucket.org/sketchpunk/sketchpunk.bitbucket.io/src/mas
 
 Fill Voxel Volume : https://bitbucket.org/sketchpunk/sketchpunk.bitbucket.io/src/c036dfb4b5a93425220b4bb482c0e96e1edc77cf/src/threejs/autoskinning/oito/voxel/SolidVoxelizer.js#lines-108
 
+http://blog.wolfire.com/2009/11/volumetric-heat-diffusion-skinning/
+http://blog.wolfire.com/2009/11/Triangle-mesh-voxelization
 https://bronsonzgeb.com/index.php/2021/06/26/volumetric-heat-diffusion-for-automatic-mesh-skinning/
 https://x.com/_naam/status/1436730675319672832?s=20
 
@@ -169,12 +171,76 @@ for( v in voxels ){
 
 
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-4. Heat Spread
+4. Geodesic Distance Voxel Crawl
 
-- Set initial heat on any voxel that intersects a bone
-- Each iteration, compute distance of its 6 neigbors
-  
+Math: https://bitbucket.org/sketchpunk/sketchpunk.bitbucket.io/src/master/src/threejs/autoskinning/oito/armature/autoskin/VoxelGeodesic.js
 
+**Initial Compute**
+Inputs
+- uvec2 : Voxel State ( Is Active & Has bone )
+Outputs
+- float : Voxel Distance
+
+**Iterative Crawl Compute : PingPong**
+Inputs
+- float : Voxel Distance
+Outputs
+- float : Voxel Distance
+
+**Notes**
+- Need to setup PingPong Buffers for storing Voxel Distance
+--- Since there is no Read+Write storage in WebGL, will need
+    Two Buffers to store the data & swop them for every 
+    crawl interation. input:a-output:b > input:b-output:a > etc
+
+- Initialize the voxel distance
+--- If bone intersects, set 0
+--- If neighbor of bone intersect, compute distance
+--- If active voxel mark it as -1, a voxel available
+--- If empty voxel mark it as -10, dont use this voxel
+
+- Each iteration, Test its 6 neighbors, use the smallest
+  distance value found if 0 or greater, compute distance
+  between the mid point of the two voxels.
+
+- Iteration count ideally can be the Max dimension, but
+  Id like to limit how much crawling, so left hand bones
+  will never travel far enough to reach right hand voxels.
+  So try Half of Max dimension to start. This value 
+  can be configurable.
+
+**Pseudo**
+dir[
+    [0,1,0]     : up
+    [0,-1,0]    : down
+    [1,0,0]     : right
+    [-1,0,0]    : left
+    [0,0,1]     : forward
+    [0,0,-1]    : back
+]
+
+for( v in voxels ){
+    // Skip Empty Voxels
+    if( v.distance < -5.0 ) continue
+
+    coord = calcCoord( v.index );
+    vMid  = calcMidPoint( vMid );
+    
+    // Loop all neighbors of a voxel
+    for( d of dir ){
+        nCoord = coord + d // Neightbor Coordinate
+        if( !isValid( nCoord ) ) continue
+
+        nMid  = calcMidPoint( nCoord )
+        dist  = v.distance + len( nMid-vMid )
+        n     = voxels( nCoord ); // Neightbor Voxel
+
+        // Store the shortest distance or set unset voxels
+        if( n.distance < 0 || dist < n.distance ){
+            n.distance = dist;
+        }
+    }
+}
 
 
 

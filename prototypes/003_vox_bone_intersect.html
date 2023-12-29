@@ -690,6 +690,9 @@ Seg getSegAt( int i ){
 void coordBounds( ivec3 coord, out vec3 bMin, out vec3 bMax ){
     bMin = vec3( coord ) * vCellSize + vMin;
     bMax = bMin + vCellSize;
+
+    // bMin -= vec3( 0.01 );
+    // bMax += vec3( 0.01 );
 }
 
 // Convert Index to Voxel Coordinate

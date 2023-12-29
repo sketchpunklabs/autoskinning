@@ -25,7 +25,7 @@ function gltfLoaderAsync( url ){
 window.addEventListener( 'load', async _=>{
     // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
     // Setup
-    App.sphericalLook( 90, 20, 2, [0,0.3,0] );
+    App.sphericalLook( 45, 20, 2, [0,0.3,0] );
     Debug = await useVisualDebug( App );
 
     // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -52,7 +52,7 @@ window.addEventListener( 'load', async _=>{
     // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
     // #region CREATE BONES & CREATE BONES DATA TEXTURE
     /**/
-    const b0 = new THREE.Bone(); b0.position.set( 0,-0.25,0 );
+    const b0 = new THREE.Bone(); b0.position.set( 0,-0.25, 0 );
     const b1 = new THREE.Bone(); b1.position.set( 0, 0.35, 0 ); b0.add( b1 );
     const b2 = new THREE.Bone(); b2.position.set( 0, 0.25, 0 ); b1.add( b2 );
     const b3 = new THREE.Bone(); b3.position.set( 0, 0.25, 0 ); b2.add( b3 );
@@ -101,13 +101,16 @@ window.addEventListener( 'load', async _=>{
     // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
     // #region SETUP VOXEL GRID
     /**/
-    const vox       = new VoxelChunk().fitBound( gMin, gMax, 2, 1.01 );
+    const vox       = new VoxelChunk().fitBound( gMin, gMax, 1, 1.01 );
     const voxMesh   = VoxVisualizer.plane( vox );
     App.scene.add( voxMesh );
     
     console.log( 'Voxel Count', vox.count );
     // console.log( 'Voxel Dimension', vox.dimension );
     Debug.ln.box( vox.minBound, vox.maxBound, 0x00ffff );
+    Debug.pnt.add( vox.minBound, 0x00ff00, 1.5, 2 );
+    Debug.pnt.add( vox.maxBound, 0xff0000, 1.5, 2 );
+    // Debug.ln.box( [0,0,0], [vox.cellSize,vox.cellSize,vox.cellSize], 0x00ffff );
     // let cor=[0,0,0], mid=[0,0,0], max=[0,0,0];
     // for( let i=0; i < vox.count; i++ ){
     //     vox.idxCoord( i, cor );
@@ -117,6 +120,9 @@ window.addEventListener( 'load', async _=>{
     //     Debug.ln.box( mid, max, 0x505050 );
     // }
     // #endregion
+
+    
+
 
     // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
     // #region TRI-VOX INTERSECTION FOR SHELL - SAVE TO DATA TEXTURE
@@ -161,6 +167,7 @@ window.addEventListener( 'load', async _=>{
     // #endregion
 
     // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    // TODO - Save to regular gl buffer as input for crawling
     // #region VOX-BONE INTERSECTION - SAVE TO GL INSTANCED BUFFER
     /**/
     App.render();
@@ -174,7 +181,24 @@ window.addEventListener( 'load', async _=>{
         .setUniform( 'segCnt', dtBones.rowLen )
         .setUniform( 'texSeg', dtBones.ref );
 
+    console.log( vox );
+
     TransformFeedback.compute( App.renderer, shCopy, { vox: voxMesh.geometry.attributes.inst } );
+    // #endregion
+    
+    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    // #region SETUP & INITIALIZE VOXEL CRAWL
+    // lorem ipsum
+    // #endregion
+
+    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    // #region LOOP VOXEL CRAWL
+    // lorem ipsum
+    // #endregion
+
+    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    // #region COPY CRAWL RESULTS TO GL INSTANCED BUFFER FOR VIZ
+    // lorem ipsum
     // #endregion
 
     // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -260,7 +284,9 @@ class VoxVisualizer{
     }
 
     static plane( vox ){
-        const buf  = new Uint32Array( vox.count * 2 );//.fill( 1.0 );
+        const iCnt = 3;
+
+        const buf  = new Uint32Array( vox.count * iCnt );//.fill( 1.0 );
         const geo  = new THREE.PlaneGeometry( 0.5, 0.5 );
         geo.rotateX( -Math.PI * 0.5 );
 
@@ -270,7 +296,7 @@ class VoxVisualizer{
         iGeo.setIndex( Array.from( geo.index.array ) ); // 3Js flips out, need to pass JS Array
         iGeo.setAttribute( 'position', geo.attributes.position );
         iGeo.setAttribute( 'normal', geo.attributes.normal );
-        iGeo.setAttribute( 'inst', new THREE.InstancedBufferAttribute( buf, 2 ) );
+        iGeo.setAttribute( 'inst', new THREE.InstancedBufferAttribute( buf, iCnt ) );
         iGeo.instanceCount = vox.count;
 
         const mat  = voxNormInstanceMaterial( vox );
@@ -594,7 +620,7 @@ uniform sampler2D texVox;
 uniform int segCnt;
 uniform sampler2D texSeg;
 
-flat out ivec2 vox;
+flat out uvec3 vox;
 // #endregion
 
 // #region INTERSECTIONS ////////////////////////////////////////////////////////////////
@@ -633,7 +659,7 @@ int segment_aabb( vec3 head, vec3 tail, vec3 bMin, vec3 bMax ){
             ( tFar  >=0.0 && tFar  <= 1.0 )
         ) return 1;
 
-        return 1;
+        // return 1; // Return true as a Ray instead of a segment
     }
 
     return 0;
@@ -691,11 +717,11 @@ int coordIdx( ivec3 coord ){
 void main(){
     vec4 px = texelFetch( texVox, ivec2( 0, gl_VertexID ), 0 );
     // vox     = ( px.x > 0.5 )? ivec2( 1u, 0u ) : ivec2( 0u );
-    vox     = ivec2( 0u );
+    vox     = uvec3( 0u );
 
     if( px.x > 0.5 ){
         int vIdx    = gl_VertexID;
-        vox.x       = 1;
+        vox.x       = 1u;
 
         // Compute Voxel's bounding area
         vec3 bMin   = vec3( 0.0 );
@@ -707,14 +733,34 @@ void main(){
         Seg seg;
         int isHit;
 
+        uint boneCnt = 0u;
+        uint ii      = 0u;
+
         for( int i=0; i < segCnt; i++ ){
             seg     = getSegAt( i );
             isHit   = segment_aabb( seg.a, seg.b, bMin, bMax );
             if( isHit == 1 ){
-                vox.y = 1; // Make as bone intersected
-                break;
+                boneCnt++;
+
+                // Convert to Uint & Increment Bone Index
+                ii = uint( i+1 ); 
+
+                // save up to 4 bones indices as uint16
+                // Paritions from the Y & Z UVEC3 components
+                if( boneCnt == 1u ){
+                    vox.y = ii;
+                }else if( boneCnt == 2u ){
+                    vox.y = ( ii << 16 ) | vox.y;
+                }else if( boneCnt == 3u ){
+                    vox.z = ii;
+                }else if( boneCnt == 4u ){
+                    vox.z = ( ii << 16 ) | vox.z;
+                }
             }
         }
+
+        // 16 Bit Partition, BoneCnt:IsVoxelActive
+        vox.x = ( boneCnt << 16 ) | 1u;  
     }
 
 }`;
@@ -738,7 +784,7 @@ function voxNormInstanceMaterial( chunk ){
         // #region DATA
         in vec3 position;
         in vec3 normal;
-        in uvec2 inst;
+        in uvec3 inst;
 
         uniform mat4 modelMatrix;
         uniform mat4 viewMatrix;
@@ -812,7 +858,7 @@ function voxNormInstanceMaterial( chunk ){
         // #endregion
 
         void main(){
-            if( inst.x == 0u ){
+            if( (inst.x & 65535u) == 0u ){
                 // VOXEL OFF
                 gl_Position = vec4( 0.0 );
             }else{
@@ -828,7 +874,15 @@ function voxNormInstanceMaterial( chunk ){
                 // vec3 pos    = quatVec( q, position );
                 // pos         = pos * vCellSize + voxMid;
 
-                fragColor  = ( inst.y >= 1u )? vec3( 1.0, 1.0, 0.0 ) : vec3( 0.4 );
+                // fragColor  = ( inst.y >= 1u )? vec3( 1.0, 1.0, 0.0 ) : vec3( 0.4 );
+
+                // bool isHit = ( inst.y == 2u )? true : false;
+                // bool isHit = ( ( inst.y >> 16 ) == 5u )? true : false;
+                // bool isHit = ( (( inst.x >> 16 ) & 65535u) == 4u )? true : false;
+                // bool isHit = ( ( inst.x >> 16 ) >= 1u )? true : false;
+                // bool isHit = ( ( inst.y & 65535u ) > 0u )? true : false;
+                bool isHit = ( ( inst.y >> 16 ) > 0u )? true : false; // Has a second bone index
+                fragColor  = ( isHit )? vec3( 1.0, 1.0, 0.0 ) : vec3( 0.4 );
 
                 // if( inst.y == 0u ) pos = vec3( 0.0 );
                 
