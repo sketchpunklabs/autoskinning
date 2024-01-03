@@ -177,7 +177,12 @@ Math: https://bitbucket.org/sketchpunk/sketchpunk.bitbucket.io/src/master/src/th
 
 **Initial Compute**
 Inputs
-- uvec2 : Voxel State ( Is Active & Has bone )
+- boneIndex
+- uvec3 : Voxel State in 16 Bit Partitions
+    Index = BoneIndex+1
+    x     = BoneCnt << 16 : IsVoxelActive( 1:0 ), BoneCnt > 0 means voxel intersect bone segment
+    y     = Index 1 << 16 : Index 0
+    z     = Index 3 << 16 : Index 2
 Outputs
 - float : Voxel Distance
 
@@ -194,10 +199,9 @@ Outputs
     crawl interation. input:a-output:b > input:b-output:a > etc
 
 - Initialize the voxel distance
---- If bone intersects, set 0
---- If neighbor of bone intersect, compute distance
---- If active voxel mark it as -1, a voxel available
---- If empty voxel mark it as -10, dont use this voxel
+--- If empty voxel, mark it as -10, done use this voxel
+--- If not empty but no bones, make as -1 as unused
+--- if boneCnt > 0 && XY has BoneIndex, set 0 as initial distance
 
 - Each iteration, Test its 6 neighbors, use the smallest
   distance value found if 0 or greater, compute distance
