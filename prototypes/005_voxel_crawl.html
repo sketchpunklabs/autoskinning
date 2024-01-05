@@ -234,9 +234,11 @@ window.addEventListener( 'load', async _=>{
     const maxDim   = vox.maxDimension();
     // const halfDist = Math.ceil( (vox.cellSize * maxDim) * 0.5 );
     const halfDist = ( vox.cellSize * vox.dimension[1] ) * 0.5;
-    const iter     = Math.ceil( maxDim * 0.5 );
 
-    console.log( halfDist );
+    // Iterate at half the max voxel dimension
+    // Good enough value for crawling most or all
+    // the voxels
+    const iter     = Math.ceil( maxDim * 0.5 );
     
     const shCrawl  = GLShader.forGPGPU( GP_CRAWL )
         .setUniform( 'vCellSize', vox.cellSize )
@@ -249,6 +251,9 @@ window.addEventListener( 'load', async _=>{
     let inTex;
     let outTex;
     for( let i=0; i < iter; i++ ){
+        // PingPong swop data textures for each iteration
+        // Can not read & write to the same buffer on the gpu
+        // So this is the only way to iterate the data
         if( (i % 2) === 0 ){
             inTex  = dtCrawl0;
             outTex = dtCrawl1;
@@ -261,15 +266,13 @@ window.addEventListener( 'load', async _=>{
         GPGPU.compute( shCrawl, outTex, rSize );
     }
 
-    
     // VISUAL TEST RESULTS
     const shCopy = GLShader.forTF( TF_COPY_TEX_F )
         // .setUniform( 'tex', dtCrawl1.ref );
         .setUniform( 'tex', outTex.ref );
     TransformFeedback.compute( App.renderer, shCopy, { to: voxMesh.geometry.attributes.inst } );
 
-    voxMesh.material.uniforms.vMaxDist.value = halfDist;
-
+    voxMesh.material.uniforms.vMaxDist.value = halfDist; // Help Visualize Distance
     // #endregion
 
     // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
