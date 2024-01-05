@@ -223,14 +223,53 @@ window.addEventListener( 'load', async _=>{
     // for( let i=0; i < fill.length; i+=4 ) console.log( fill[i+0], fill[i+1], fill[i+2] , fill[i+3] );
 
     // VISUAL TEST RESULTS
-    const shCopy = GLShader.forTF( TF_COPY_TEX_F )
-        .setUniform( 'tex', dtCrawl0.ref );
-    TransformFeedback.compute( App.renderer, shCopy, { to: voxMesh.geometry.attributes.inst } );
+    // const shCopy = GLShader.forTF( TF_COPY_TEX_F )
+    //     .setUniform( 'tex', dtCrawl0.ref );
+    // TransformFeedback.compute( App.renderer, shCopy, { to: voxMesh.geometry.attributes.inst } );
     // #endregion
 
     // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
     // #region LOOP VOXEL CRAWL
-    // lorem ipsum
+    const rSize    = App.getRenderSize();
+    const maxDim   = vox.maxDimension();
+    // const halfDist = Math.ceil( (vox.cellSize * maxDim) * 0.5 );
+    const halfDist = ( vox.cellSize * vox.dimension[1] ) * 0.5;
+    const iter     = Math.ceil( maxDim * 0.5 );
+
+    console.log( halfDist );
+    
+    const shCrawl  = GLShader.forGPGPU( GP_CRAWL )
+        .setUniform( 'vCellSize', vox.cellSize )
+        .setUniform( 'vXZCount', vox.xzCount )
+        .setUniform( 'vDimension', vox.dimension )
+        .setUniform( 'vMin', vox.minBound )
+        .setUniform( 'tex', dtCrawl0.ref );
+    // GPGPU.compute( shCrawl, dtCrawl1, App.getRenderSize() );
+
+    let inTex;
+    let outTex;
+    for( let i=0; i < iter; i++ ){
+        if( (i % 2) === 0 ){
+            inTex  = dtCrawl0;
+            outTex = dtCrawl1;
+        }else{
+            inTex  = dtCrawl1;
+            outTex = dtCrawl0;
+        }
+
+        shCrawl.setUniform( 'tex', inTex.ref );
+        GPGPU.compute( shCrawl, outTex, rSize );
+    }
+
+    
+    // VISUAL TEST RESULTS
+    const shCopy = GLShader.forTF( TF_COPY_TEX_F )
+        // .setUniform( 'tex', dtCrawl1.ref );
+        .setUniform( 'tex', outTex.ref );
+    TransformFeedback.compute( App.renderer, shCopy, { to: voxMesh.geometry.attributes.inst } );
+
+    voxMesh.material.uniforms.vMaxDist.value = halfDist;
+
     // #endregion
 
     // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -870,6 +909,120 @@ void main(){
         }
     }
 }`;
+
+const GP_CRAWL = `#version 300 es
+precision highp float;
+
+// #region DATA ////////////////////////////////////////////////////////////////
+uniform float vCellSize;    // Size of a voxel cell
+uniform int   vXZCount;     // How many voxels in one level
+uniform ivec3 vDimension;   // Voxel chunk size, how many voxels in each axis
+uniform vec3  vMin;         // Min Bounding for Voxel Chunk
+
+uniform highp sampler2D tex; // Data from previous pass
+
+out vec4 outColor;
+
+const ivec3[6] dirs = ivec3[6](
+    ivec3(  0,  1,  0 ), // up
+    ivec3(  0, -1,  0 ), // down
+    ivec3(  1,  0,  0 ), // right
+    ivec3( -1,  0,  0 ), // left
+    ivec3(  0,  0,  1 ), // forward
+    ivec3(  0,  0, -1 )  // back
+);
+// #endregion
+
+// #region VOXEL ////////////////////////////////////////////////////////////////
+
+// Compute center point at voxel coordinate
+vec3 coordMidPoint( ivec3 coord ){
+    return vec3( coord ) * vCellSize + vMin + ( vCellSize * 0.5 );
+}
+
+// Convert Index to Voxel Coordinate
+ivec3 idxCoord( int i ){
+    int y   = i / vXZCount;            // How Many Y Levels Can We Get?
+    int xz  = i - ( y * vXZCount );    // Subtract Y Levels from total, To get remaining Layer
+    int z   = xz / vDimension.x;       // How many rows in the last layer can we get?
+    int x   = xz - z * vDimension.x;   // With all the rows removed, how many left
+    return ivec3( x, y, z );
+}
+
+// Convert cvoxel coordinate to index
+int coordIdx( ivec3 coord ){
+    // ( xLen * zLen * y ) + ( xLen * z ) + x
+    return vXZCount * coord.y + vDimension.x * coord.z + coord.x;
+}
+
+bool isValidCoord( ivec3 c ){
+    return ( 
+        c.x >= 0 && c.x < vDimension.x &&
+        c.y >= 0 && c.y < vDimension.y &&
+        c.z >= 0 && c.z < vDimension.z
+    );
+}
+// #endregion
+
+void main(){
+    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    int idx  = int( gl_FragCoord.y );
+    float px = texelFetch( tex, ivec2( 0, idx ), 0 ).r;
+    
+    // Even tho its just a Float out, must set GBA as 0,0,1, 
+    // else R gets effed up with anything else somehow???
+    // Vec2 & Vec3 doesn't work either, just Vec4.
+    outColor = vec4( px, 0., 0., 1. );
+
+    // Skip any empty voxels, should be set as -10.0
+    // Float points arent precise values for equal tests
+    // So lets play it safe and test for -5 instead :)
+    if( px < -5.0 ) return;
+
+    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    // Traverse each neighbor voxel
+    ivec3 vCoord  = idxCoord( idx );
+    vec3  vMid    = coordMidPoint( vCoord );
+    float minDist = px;
+    
+    ivec3 nCoord;
+    int   nIdx;
+    float nDist;
+    float dist;
+    vec3  nMid;
+
+    for( int i=0; i < 6; i++ ){
+        // ---------------------------
+        // Only use valid voxel coordinates for neighbors
+        nCoord = vCoord + dirs[ i ];
+        if( !isValidCoord( nCoord ) ) continue;
+
+        // ---------------------------
+        // Look for neighor connected to a bone path
+        // If a voxel is set to -1, it is not part of
+        // a path
+        nIdx   = coordIdx( nCoord );
+        nDist  = texelFetch( tex, ivec2( 0, nIdx ), 0 ).r;
+        if( nDist < 0.0 ) continue;
+        
+        // ---------------------------
+        // Compute distance from bone using voxel 
+        // mid points plus neighbors distance
+        // This should compute total crawl distance
+        // traveled from the bone. 
+        nMid = coordMidPoint( nCoord );
+        dist = length( vMid - nMid ) + nDist;
+
+        minDist = ( minDist < 0.0 )  // If unused...
+            ? dist                   // Use computed distance
+            : min( minDist, dist );  // Else use shortest distance to bone
+    }
+
+    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    // Finalize
+    outColor.x = minDist;
+}`;
+
 // #endregion
 
 
@@ -1105,6 +1258,7 @@ function voxTestResults( chunk ){
             vXZCount    : { type:'int', value:chunk.xzCount },
             vDimension  : { type:'ivec3', value:chunk.dimension },
             vMin        : { type:'vec3', value:chunk.minBound },
+            vMaxDist    : { type:'float', value:0 },
         },
 
         // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1124,6 +1278,7 @@ function voxTestResults( chunk ){
         uniform int   vXZCount;     // How many voxels in one level
         uniform ivec3 vDimension;   // Voxel chunk size, how many voxels in each axis
         uniform vec3  vMin;         // Min Bounding for Voxel Chunk
+        uniform float vMaxDist;
 
         out vec3 fragWPos;
         out vec3 fragNorm;
@@ -1205,9 +1360,20 @@ function voxTestResults( chunk ){
                 // pos         = pos * vCellSize + voxMid;
 
                 // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-                bool isHit = ( inst == 0.0 )? true : false;
-                fragColor  = ( isHit )? vec3( 1.0, 1.0, 0.0 ) : vec3( 0.4 );
+                // bool isHit = ( inst == 0.0 )? true : false;
+                // bool isHit = ( inst == -2.0 )? true : false;
+                // bool isHit = ( inst > 0.0 )? true : false;
+                // fragColor  = ( isHit )? vec3( 1.0, 1.0, 0.0 ) : vec3( 0.4 );
 
+                // if( inst == 0.0 ) fragColor = vec3( 0.0, 1.0, 0.0 );
+
+                fragColor = mix(
+                    vec3( 1.0, 0.0, 0.0 ),
+                    vec3( 0.0, 1.0, 1.0 ),
+                    inst / vMaxDist
+                );
+
+                if( inst == 0.0 ) fragColor = vec3( 0.0, 1.0, 0.0 );
                 
                 // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
                 // Output
