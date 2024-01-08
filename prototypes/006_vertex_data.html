@@ -1,0 +1,1615 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8" /><meta name="viewport" content="width=device-width, initial-scale=1.0" /><title></title></head>
+<style>canvas{ display:block; } body, html { padding:0px; margin:0px; width:100%; height:100%; }</style>
+<body><script src="../import-map.js"></script><script type="module"></script><script type="module">
+
+// #region IMPORTS
+import useThreeWebGL2, { THREE, useDarkScene, useVisualDebug } from '../lib/useThreeWebGL2.js';
+import { GLContext, GPGPU, TransformFeedback, GLShader, GLBuffer, GLDataTexture } from '../lib/gl/index.js';
+
+import VoxelChunk           from '../lib/VoxelChunk.js';
+import { GLTFLoader }       from 'tp/GLTFLoader.js';
+// #endregion
+
+// #region MAIN
+let App   = useDarkScene( useThreeWebGL2() );
+let Ref   = {};
+let Debug;
+
+function gltfLoaderAsync( url ){
+    return new Promise( ( resolve, reject )=>{
+        const loader = new GLTFLoader();
+        loader.load( url, resolve, null, reject );
+    });
+}
+
+window.addEventListener( 'load', async _=>{
+    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    // Setup
+    App.sphericalLook( 45, 20, 2, [0,0.3,0] );
+    Debug = await useVisualDebug( App );
+
+    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    GLContext.init( App.renderer.getContext() );
+    
+    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    // #region LOAD SHAPE & CREATE TRIANGLE DATA TEXTURE
+    // Load Shape
+    const gltf      = await gltfLoaderAsync( './assets/war_sword.gltf' );
+    const shape     = gltf.scene.children[0]; //useShape();
+    shape.geometry.computeBoundingBox();
+    console.log( 'Triangle Count:', shape.geometry.index.count / 3 );
+
+    const gMin      = shape.geometry.boundingBox.min.toArray();
+    const gMax      = shape.geometry.boundingBox.max.toArray();
+
+    // Save triangle data to a DataTexture
+    const dtTri     = geoToDataTexture( shape.geometry, GLContext.ctx );
+
+    shape.position.z = 0.5;
+    shape.material   = weightMaterial();
+
+    // Create new attributes for skinning data
+    const sGeo = shape.geometry;
+    const vCnt = sGeo.attributes.position.count;
+    sGeo.setAttribute( 'skinWeight', new THREE.BufferAttribute( new Float32Array(vCnt * 4).fill(0), 4 ) );
+    sGeo.setAttribute( 'skinIndex',  new THREE.BufferAttribute( new Float32Array(vCnt * 4).fill(), 4 ) );
+
+    App.scene.add( shape );
+    // #endregion
+
+    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    // #region CREATE BONES & CREATE BONES DATA TEXTURE
+    /**/
+    const b0 = new THREE.Bone(); b0.position.set( 0,-0.25, 0 );
+    const b1 = new THREE.Bone(); b1.position.set( 0, 0.35, 0 ); b0.add( b1 );
+    const b2 = new THREE.Bone(); b2.position.set( 0, 0.25, 0 ); b1.add( b2 );
+    const b3 = new THREE.Bone(); b3.position.set( 0, 0.25, 0 ); b2.add( b3 );
+
+    const bones = [ b0, b1, b2, b3 ];
+    const skel  = new THREE.Skeleton( bones );
+    const bView = new THREE.SkeletonHelper( bones[0] );
+    App.scene.add( bView );
+    
+    const mat  = new THREE.MeshPhongMaterial( { flatShading:true } );
+    const mesh = new THREE.SkinnedMesh( shape.geometry, mat );
+    mesh.add( skel.bones[ 0 ] );
+    mesh.bind( skel );
+
+    const dtBones = GLDataTexture.asFloat32( 2, bones.length, 3 );
+    console.log( 'Bone Count', bones.length );
+    
+    const v = new THREE.Vector3();
+    for( let i=0; i < bones.length; i++ ){
+        // Start Point
+        const cp = bones[i].getWorldPosition( v ).toArray()
+        
+        // End Point
+        const np = ( i < bones.length-1 )
+            ? bones[i+1].getWorldPosition( v ).toArray()
+            : [ cp[0], cp[1]+0.25, cp[2] ];
+
+        dtBones.setRaw(
+            i,
+            cp[ 0 ],
+            cp[ 1 ],
+            cp[ 2 ],
+            np[ 0 ],
+            np[ 1 ],
+            np[ 2 ],
+        );
+
+        Debug.pnt.add( cp, 0xffff00, 0.5 );
+        // Debug.pnt.add( np, 0x00ff00, 4 );
+        Debug.ln.add( cp, np, 0x00ff00 );
+    }
+
+    dtBones.upload();
+    // #endregion
+
+    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    // #region SETUP VOXEL GRID
+    /**/
+    const vox       = new VoxelChunk().fitBound( gMin, gMax, 1, 1.01 );
+    // const voxMesh   = VoxVisualizer.plane( vox ); // Test Vox-Bone Intersection
+    const voxMesh   = VoxVisualizer.planeTest( vox );   // Test Vox Crawl
+    App.scene.add( voxMesh );
+    
+    console.log( 'Voxel Count', vox.count );
+    // console.log( 'Voxel Dimension', vox.dimension );
+    Debug.ln.box( vox.minBound, vox.maxBound, 0x00ffff );
+    Debug.pnt.add( vox.minBound, 0x00ff00, 1.5, 2 );
+    Debug.pnt.add( vox.maxBound, 0xff0000, 1.5, 2 );
+    // Debug.ln.box( [0,0,0], [vox.cellSize,vox.cellSize,vox.cellSize], 0x00ffff );
+    // let cor=[0,0,0], mid=[0,0,0], max=[0,0,0];
+    // for( let i=0; i < vox.count; i++ ){
+    //     vox.idxCoord( i, cor );
+    //     // vox.coordMidPoint( cor, mid );
+    //     vox.coordBound( cor, mid, max );
+    //     // Debug.pnt.add( mid, 0x505050, 2 );
+    //     Debug.ln.box( mid, max, 0x505050 );
+    // }
+    // #endregion
+
+    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    // #region TRI-VOX INTERSECTION FOR SHELL - SAVE TO DATA TEXTURE
+    // Compute Triangle-Voxel Intersection, Write results to a DataTexture
+    /**/
+    const dtShell   = GLDataTexture.asFloat32( 1, vox.count, 4 ).upload();
+    const shTriVox  = GLShader.forGPGPU( GP_VOX_TRI )
+        .setUniform( 'vCellSize', vox.cellSize )
+        .setUniform( 'vXZCount', vox.xzCount )
+        .setUniform( 'vDimension', vox.dimension )
+        .setUniform( 'vMin', vox.minBound )
+        .setUniform( 'triCnt', dtTri.rowLen )
+        .setUniform( 'texTri', dtTri.ref );
+
+    GPGPU.compute( shTriVox, dtShell, App.getRenderSize() );
+
+    // const f32 = GPGPU.readFloat32( dtShell );
+    // // for( let i=0; i < f32.length; i+=4 ) console.log( f32[i+0],f32[i+1],f32[i+2],f32[i+3] );
+    
+    // var cnt=0;
+    // for( let i=0; i < f32.length; i+=4 ) if( f32[i+3] == 1 ) cnt++;
+    // console.log( 'Shell Voxels', cnt );
+    // #endregion
+    
+    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    // #region FILL VOXEL SHELL - SAVE TO DATA TEXTURE
+    /**/
+    const dtSolid   = GLDataTexture.asUint8( 1, vox.count, 1 ).upload();
+    const shVoxFill = GLShader.forGPGPU( GP_VOX_FILL )
+        .setUniform( 'vXZCount', vox.xzCount )
+        .setUniform( 'vDimension', vox.dimension )
+        .setUniform( 'tex', dtShell.ref );
+
+    GPGPU.compute( shVoxFill, dtSolid, App.getRenderSize() );
+    
+    // const fill = GPGPU.readUint8( dtSolid );
+    // // for( let i=0; i < fill.length; i+=4 ) console.log( fill[i+0] );
+
+    // var cnt=0;
+    // for( let i=0; i < fill.length; i+=4 ) if( fill[i] == 255 ) cnt++;
+    // console.log( 'Fill Voxels', cnt );
+    // #endregion
+
+    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    // #region VOX-BONE INTERSECTION - SAVE TO GL INSTANCED BUFFER
+    /**/
+    App.render();
+
+    // const bufBoneVox = GLBuffer.asUint32( 3, false ).set( 4 * 3 * vox.count ); // Buffer size in bytes, 4 bytes per component(3) per voxel
+    // const shBoneVox  = GLShader.forTF( TF_BONE_INTER )
+    //     .setUniform( 'vCellSize', vox.cellSize )
+    //     .setUniform( 'vXZCount', vox.xzCount )
+    //     .setUniform( 'vDimension', vox.dimension )
+    //     .setUniform( 'vMin', vox.minBound )
+    //     .setUniform( 'texVox', dtSolid.ref )
+    //     .setUniform( 'segCnt', dtBones.rowLen )
+    //     .setUniform( 'texSeg', dtBones.ref );
+
+    // // TransformFeedback.compute( App.renderer, shBoneVox, { vox: voxMesh.geometry.attributes.inst } );
+    // TransformFeedback.compute( App.renderer, shBoneVox, { vox: bufBoneVox } );
+
+
+    // Need to use RGBA_int, RGB_int is not bindable for framebuffer
+    const dtBoneVox  = GLDataTexture.asUint32( 1, vox.count, 4 ).upload();
+    const shBoneVox  = GLShader.forGPGPU( GP_BONE_INTER )
+        .setUniform( 'vCellSize', vox.cellSize )
+        .setUniform( 'vXZCount', vox.xzCount )
+        .setUniform( 'vDimension', vox.dimension )
+        .setUniform( 'vMin', vox.minBound )
+        .setUniform( 'texVox', dtSolid.ref )
+        .setUniform( 'segCnt', dtBones.rowLen )
+        .setUniform( 'texSeg', dtBones.ref );
+
+    GPGPU.compute( shBoneVox, dtBoneVox, App.getRenderSize() );
+
+    // const fill = GPGPU.readUint32( dtBoneVox );
+    // for( let i=0; i < fill.length; i+=4 ) console.log( fill[i+0], fill[i+1], fill[i+2] , fill[i+3] );
+
+    // const shCopy = GLShader.forTF( TF_COPY_TEX_U )
+    //     .setUniform( 'tex', dtBoneVox.ref );
+    // TransformFeedback.compute( App.renderer, shCopy, { to: voxMesh.geometry.attributes.inst } );
+    // #endregion
+    
+    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    // #region SETUP & INITIALIZE VOXEL CRAWL
+    const BONE_IDX = 0;
+
+    // Setup PingPong Buffers
+    const dtCrawl0    = GLDataTexture.asFloat32( 1, vox.count, 1 ).upload();
+    const dtCrawl1    = GLDataTexture.asFloat32( 1, vox.count, 1 ).upload();
+
+    const shCrawlInit = GLShader.forGPGPU( GP_CRAWL_INIT )
+        .setUniform( 'boneIndex', BONE_IDX )
+        .setUniform( 'tex', dtBoneVox.ref );
+
+    GPGPU.compute( shCrawlInit, dtCrawl0, App.getRenderSize() );
+
+    // TRANSFER DATA-TEXTURE TO RAM FOR CONSOLE_LOG INSPECTION
+    // const fill = GPGPU.readFloat32( dtCrawl0 );
+    // for( let i=0; i < fill.length; i+=4 ) console.log( fill[i+0], fill[i+1], fill[i+2] , fill[i+3] );
+
+    // VISUAL TEST RESULTS
+    // const shCopy = GLShader.forTF( TF_COPY_TEX_F )
+    //     .setUniform( 'tex', dtCrawl0.ref );
+    // TransformFeedback.compute( App.renderer, shCopy, { to: voxMesh.geometry.attributes.inst } );
+    // #endregion
+
+    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    // #region LOOP VOXEL CRAWL
+    const rSize    = App.getRenderSize();
+    const maxDim   = vox.maxDimension();
+    // const halfDist = Math.ceil( (vox.cellSize * maxDim) * 0.5 );
+    const halfDist = ( vox.cellSize * vox.dimension[1] ) * 0.5;
+
+    // Iterate at half the max voxel dimension
+    // Good enough value for crawling most or all
+    // the voxels
+    const iter     = Math.ceil( maxDim * 0.5 );
+    
+    const shCrawl  = GLShader.forGPGPU( GP_CRAWL )
+        .setUniform( 'vCellSize', vox.cellSize )
+        .setUniform( 'vXZCount', vox.xzCount )
+        .setUniform( 'vDimension', vox.dimension )
+        .setUniform( 'vMin', vox.minBound )
+        .setUniform( 'tex', dtCrawl0.ref );
+    // GPGPU.compute( shCrawl, dtCrawl1, App.getRenderSize() );
+
+    let inTex;
+    let outTex;
+    for( let i=0; i < iter; i++ ){
+        // PingPong swop data textures for each iteration
+        // Can not read & write to the same buffer on the gpu
+        // So this is the only way to iterate the data
+        if( (i % 2) === 0 ){
+            inTex  = dtCrawl0;
+            outTex = dtCrawl1;
+        }else{
+            inTex  = dtCrawl1;
+            outTex = dtCrawl0;
+        }
+
+        shCrawl.setUniform( 'tex', inTex.ref );
+        GPGPU.compute( shCrawl, outTex, rSize );
+    }
+
+    // VISUAL TEST RESULTS
+    const shCopy = GLShader.forTF( TF_COPY_TEX_F )
+        // .setUniform( 'tex', dtCrawl1.ref );
+        .setUniform( 'tex', outTex.ref );
+    TransformFeedback.compute( App.renderer, shCopy, { to: voxMesh.geometry.attributes.inst } );
+
+    voxMesh.material.uniforms.vMaxDist.value = halfDist; // Help Visualize Distance
+    // #endregion
+
+    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    // #region COPY CRAWL DISTANCE AS SKIN WEIGHT + INDEICES
+
+    const shVertex = GLShader.forTF( TF_VERTEX )
+        .setUniform( 'vCellSize', vox.cellSize )
+        .setUniform( 'vXZCount', vox.xzCount )
+        .setUniform( 'vDimension', vox.dimension )
+        .setUniform( 'vMin', vox.minBound )
+        .setUniform( 'tex', outTex.ref );
+
+    TransformFeedback.compute( App.renderer, shVertex, {
+        position    : shape.geometry.attributes.position,
+        outIndex    : shape.geometry.attributes.skinIndex,
+        outWeight   : shape.geometry.attributes.skinWeight,
+    });
+
+    shape.material.vMaxDist = halfDist;
+
+    // #endregion
+
+    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    App.renderLoop();
+});
+// #endregion
+
+
+function useShape(){
+    const geo   = new THREE.SphereGeometry( 1, 5, 5 ); 
+    geo.computeBoundingBox();
+    
+    const mat  = new THREE.MeshPhongMaterial( { color: 0x00ffff } ); 
+    const mesh = new THREE.Mesh( geo, mat ); 
+    return mesh;
+}
+
+function geoToDataTexture( geo, gl ){
+    const verts     = geo.attributes.position.array;
+    const indie     = geo.index.array;
+    const triCnt    = indie.length / 3;
+    const dt        = GLDataTexture.asFloat32( 3, triCnt, 3 ); // 3xN Texture using RGB
+
+    let a, b, c, ii;
+    for( let i=0; i < triCnt; i++ ){
+        ii = i * 3;
+        a  = indie[ ii+0 ] * 3;
+        b  = indie[ ii+1 ] * 3;
+        c  = indie[ ii+2 ] * 3;
+
+        dt.setRaw(
+            i,
+            verts[ a+0 ],
+            verts[ a+1 ],
+            verts[ a+2 ],
+            verts[ b+0 ],
+            verts[ b+1 ],
+            verts[ b+2 ],
+            verts[ c+0 ],
+            verts[ c+1 ],
+            verts[ c+2 ],
+        );
+    }
+
+    dt.upload();
+    return dt;
+}
+
+
+class VoxVisualizer{
+
+    static box( vox ){
+        const box  = new THREE.BoxGeometry( 1, 1, 1 ); 
+        const iGeo = new THREE.InstancedBufferGeometry();
+        iGeo.setIndex( Array.from( box.index.array ) ); // 3Js flips out, need to pass JS Array
+        iGeo.setAttribute( 'position', box.attributes.position );
+        iGeo.setAttribute( 'normal', box.attributes.normal );
+        iGeo.setAttribute( 'inst', new THREE.InstancedBufferAttribute( vox.cells, 1 ) );
+        iGeo.instanceCount = vox.count;
+
+        const mat  = voxInstanceMaterial( vox );
+        const mesh = new THREE.Mesh( iGeo, mat );
+        return mesh;
+    }
+
+    static norm( vox ){
+        const buf  = new Float32Array( vox.count * 4 );
+        // const geo  = new THREE.ConeGeometry( 0.4, 1.5, 4 ); 
+
+        const geo  = new THREE.CylinderGeometry( 0.05, 0.2, 0.5, 4 );
+        geo.translate( 0.0, 0.25, 0.0 );
+
+        const iGeo = new THREE.InstancedBufferGeometry();
+        iGeo.setIndex( Array.from( geo.index.array ) ); // 3Js flips out, need to pass JS Array
+        iGeo.setAttribute( 'position', geo.attributes.position );
+        iGeo.setAttribute( 'normal', geo.attributes.normal );
+        iGeo.setAttribute( 'inst', new THREE.InstancedBufferAttribute( buf, 4 ) );
+        iGeo.instanceCount = vox.count;
+
+        const mat  = voxNormInstanceMaterial( vox );
+        const mesh = new THREE.Mesh( iGeo, mat );
+        return mesh;
+    }
+
+    static plane( vox ){
+        const iCnt = 3;
+
+        const buf  = new Uint32Array( vox.count * iCnt );//.fill( 1.0 );
+        const geo  = new THREE.PlaneGeometry( 0.5, 0.5 );
+        geo.rotateX( -Math.PI * 0.5 );
+
+        // const geo  = new THREE.BoxGeometry( 0.2,0.2,0.2 );
+
+        const iGeo = new THREE.InstancedBufferGeometry();
+        iGeo.setIndex( Array.from( geo.index.array ) ); // 3Js flips out, need to pass JS Array
+        iGeo.setAttribute( 'position', geo.attributes.position );
+        iGeo.setAttribute( 'normal', geo.attributes.normal );
+        iGeo.setAttribute( 'inst', new THREE.InstancedBufferAttribute( buf, iCnt ) );
+        iGeo.instanceCount = vox.count;
+
+        const mat  = voxNormInstanceMaterial( vox );
+        const mesh = new THREE.Mesh( iGeo, mat );
+        return mesh;
+    }
+
+    static planeTest( vox ){
+        const iCnt = 1;
+
+        const buf  = new Float32Array( vox.count * iCnt );//.fill( 1.0 );
+        const geo  = new THREE.PlaneGeometry( 0.5, 0.5 );
+        geo.rotateX( -Math.PI * 0.5 );
+
+        // const geo  = new THREE.BoxGeometry( 0.2,0.2,0.2 );
+
+        const iGeo = new THREE.InstancedBufferGeometry();
+        iGeo.setIndex( Array.from( geo.index.array ) ); // 3Js flips out, need to pass JS Array
+        iGeo.setAttribute( 'position', geo.attributes.position );
+        iGeo.setAttribute( 'normal', geo.attributes.normal );
+        iGeo.setAttribute( 'inst', new THREE.InstancedBufferAttribute( buf, iCnt ) );
+        iGeo.instanceCount = vox.count;
+
+        const mat  = voxTestResults( vox );
+        const mesh = new THREE.Mesh( iGeo, mat );
+        return mesh;
+    }
+
+}
+
+
+// #region AUTOSKINNING COMPUTE SHADERS
+const GP_VOX_TRI = `#version 300 es
+precision highp float;
+
+// #region DATA
+uniform float vCellSize;    // Size of a voxel cell
+uniform int   vXZCount;     // How many voxels in one level
+uniform ivec3 vDimension;   // Voxel chunk size, how many voxels in each axis
+uniform vec3  vMin;         // Min Bounding for Voxel Chunk
+uniform int   triCnt;       // How many triangles to test
+
+// Datatexture storing 3xN RGB Float32 Data
+// uniform highp sampler2D texTri; // Doesn't crash compiler but uniform gets treated as its not being used
+uniform sampler2D texTri;
+
+out vec4 outColor;
+// #endregion
+
+// #region INTERSECTION ////////////////////////////////////////////////////////////////
+
+// Original : https://gist.github.com/yomotsu/d845f21e2e1eb49f647f
+// Prototype Javascript Version : https://bitbucket.org/sketchpunk/sketchpunk.bitbucket.io/src/master/src/threejs/autoskinning/oito/geometry/Intersect.js
+
+// int triangle_aabb( vec3 a, vec3 b, vec3 c, vec3 minBox, vec3 maxBox ){
+int triangle_aabb( vec3 a, vec3 b, vec3 c, vec3 center, float halfLen ){
+    float p0;
+    float p1;
+    float p2;
+    float r;
+    
+    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    // Compute box center and extents of AABoundingBox (if not already given in that format)
+    
+    // vec3 center = minBox * 0.5 + maxBox * 0.5;
+    // vec3 extents = maxBox - center;
+    vec3 extents = vec3( halfLen );
+
+    // Translate triangle as conceptually moving AABB to origin
+    vec3 v0 = a - center;
+    vec3 v1 = b - center;
+    vec3 v2 = c - center;
+    
+    // Compute edge vectors for triangle
+    vec3 f0 = v1 - v0;
+    vec3 f1 = v2 - v1;
+    vec3 f2 = v0 - v2;
+    
+    // Test axes a00..a22 ( category 3 )
+    vec3 a00 = vec3(      0, -f0[2],  f0[1] );
+    vec3 a01 = vec3(      0, -f1[2],  f1[1] ); 
+    vec3 a02 = vec3(      0, -f2[2],  f2[1] ); 
+    vec3 a10 = vec3(  f0[2],      0, -f0[0] ); 
+    vec3 a11 = vec3(  f1[2],      0, -f1[0] ); 
+    vec3 a12 = vec3(  f2[2],      0, -f2[0] ); 
+    vec3 a20 = vec3( -f0[1],  f0[0],      0 ); 
+    vec3 a21 = vec3( -f1[1],  f1[0],      0 ); 
+    vec3 a22 = vec3( -f2[1],  f2[0],      0 );
+
+    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    // Axis Testing
+    
+    /*
+    p0 = v0.dot( a00 );
+    p1 = v1.dot( a00 );
+    p2 = v2.dot( a00 );
+    r  = extents[1] * Math.abs( f0[2] ) + extents[2] * Math.abs( f0[1] );
+    if( Math.max( -Math.max( p0, p1, p2 ), Math.min( p0, p1, p2 ) ) > r ) return false;
+    */
+    
+    vec3[9] aryAxis = vec3[9]( a00, a01, a02, a10, a11, a12, a20, a21, a22 ); // Axis Point
+    vec3[9] aryEdge = vec3[9]( f0, f1, f2, f0, f1, f2, f0, f1, f2 ); // Triangle Vector Length Edges
+    int[9] aryAA    = int[9]( 1, 1, 1, 0, 0, 0, 0, 0, 0 );  // First Axis Component
+    int[9] aryBB    = int[9]( 2, 2, 2, 2, 2, 2, 1, 1, 1 );  // Second Axis Component
+
+    for ( int i=0; i < 9; i++ ){
+        // -----------------------------------
+        // Project all 3 vertices of the triangle onto the seperating axis
+        p0 = dot( v0, aryAxis[i] );
+        p1 = dot( v1, aryAxis[i] );
+        p2 = dot( v2, aryAxis[i] );
+
+        // -----------------------------------
+        // Project the aabb onto the seperating axis
+        r = extents[ aryAA[i] ] * 
+            abs( aryEdge[i][ aryBB[i] ] ) + 
+            extents[ aryBB[i] ] *
+            abs( aryEdge[i][ aryAA[i] ] );
+
+        // -----------------------------------
+        // Axis is a separating axis, then false
+        // Actual test, basically see if either of the most extreme of the triangle points intersects r.
+        // Points of the projected triangle are outside the projected half-length of the aabb
+        // the axis is seperating and we can exit.
+        if( max( 
+             -max( p0, max( p1, p2 ) ), 
+              min( p0, min( p1, p2 ) ) 
+          ) > r 
+        ) return 0;
+    }
+
+    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    // Test the three axes corresponding to the face normals of AABB b (category 1). Exit if...
+    // ... [-extents.x, extents.x] and [min(v0.x,v1.x,v2.x), max(v0.x,v1.x,v2.x)] do not overlap
+
+    if( max( v0.x, max( v1.x, v2.x ) ) < -extents.x || 
+        min( v0.x, min( v1.x, v2.x ) ) > extents.x
+    ) return 0;
+
+    // ... [-extents.y, extents.y] and [min(v0.y,v1.y,v2.y), max(v0.y,v1.y,v2.y)] do not overlap
+    if( max( v0.y, max( v1.y, v2.y ) ) < -extents.y || 
+        min( v0.y, min( v1.y, v2.y ) ) > extents.y
+    ) return 0;
+
+    // ... [-extents.z, extents.z] and [min(v0.z,v1.z,v2.z), max(v0.z,v1.z,v2.z)] do not overlap    
+    if( max( v0.z, max( v1.z, v2.z ) ) < -extents.z || 
+        min( v0.z, min( v1.z, v2.z ) ) > extents.z
+    ) return 0;
+
+    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    // Intersection AABB-Plane
+    // Test separating axis corresponding to triangle face normal (category 2)
+    // Face Normal is -ve as Triangle is clockwise winding (and XNA uses -z for into screen)
+
+    vec3 planeNorm   = normalize( cross( f1, f0 ) );
+    float planeConst = dot( planeNorm, a );
+
+    r = extents[0] * abs( planeNorm[0] ) +
+        extents[1] * abs( planeNorm[1] ) +
+        extents[2] * abs( planeNorm[2] );
+
+    float s = abs( dot( planeNorm, center ) - planeConst );
+    return ( s <= r )? 1 : 0;
+}
+// #endregion
+
+// #region TRI DATA //////////////////////////////////////////////////////////////////
+
+struct Tri{
+    vec3 a;
+    vec3 b;
+    vec3 c;
+};
+
+Tri getTriAt( int i ){
+    return Tri(
+        texelFetch( texTri, ivec2( 0, i ), 0 ).rgb,
+        texelFetch( texTri, ivec2( 1, i ), 0 ).rgb,
+        texelFetch( texTri, ivec2( 2, i ), 0 ).rgb
+    );
+}
+
+// #endregion
+
+// #region VOXEL ////////////////////////////////////////////////////////////////
+
+// Compute center point at voxel coordinate
+vec3 coordMidPoint( ivec3 coord ){
+    return vec3( coord ) * vCellSize + vMin + ( vCellSize * 0.5 );
+}
+
+// Convert Index to Voxel Coordinate
+ivec3 idxCoord( int i ){
+    int y   = i / vXZCount;            // How Many Y Levels Can We Get?
+    int xz  = i - ( y * vXZCount );    // Subtract Y Levels from total, To get remaining Layer
+    int z   = xz / vDimension.x;       // How many rows in the last layer can we get?
+    int x   = xz - z * vDimension.x;   // With all the rows removed, how many left
+    return ivec3( x, y, z );
+}
+// #endregion
+
+void main() {
+    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    // Voxel Position
+    int   idx     = int( gl_FragCoord.y ); // Single Pixel width, so Y is row index
+    ivec3 coord   = idxCoord( idx );
+    vec3 voxMid   = coordMidPoint( coord );
+
+    // outColor = vec4( gl_FragCoord.xy, 9.0, 10.0 ); // Float32 Data
+    // outColor = vec4( gl_FragCoord.xy/255.0, 9.0/255.0, 10.0/255.0 ); // Uint8 Data
+    // outColor = vec4( gl_FragCoord.xy, 0.0, triCnt );
+    // outColor = vec4( coord, idx);
+
+    // Tri t     = getTriAt( 0 );
+    // outColor = vec4( t.c, 0);
+
+    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    Tri t;
+    int isHit;
+    float halfLen = vCellSize * 0.5;
+    float tCnt    = 0.0;
+    vec3  dir     = vec3( 0. );
+
+    for( int i=0; i < triCnt; i++ ){
+        t     = getTriAt( i );
+        isHit = triangle_aabb( t.a, t.b, t.c, voxMid, halfLen );
+
+        if( isHit == 1 ){
+            // outColor = vec4( normalize( cross( t.b-t.a, t.c-t.a ) ), 1.0 );
+
+            // Compute average normal direction
+            dir += normalize( cross( t.b-t.a, t.c-t.a ) );
+            tCnt++;
+        }
+    }
+
+    outColor = ( tCnt < 0.1 )? vec4( 0.0 ) : vec4( normalize( dir / tCnt ), 1.0 );
+}`;
+
+const GP_VOX_FILL = `#version 300 es
+precision highp float;
+
+// #region DATA ////////////////////////////////////////////////////////////////
+
+// uni_form float vCellSize;    // Size of a voxel cell
+uniform int   vXZCount;         // How many voxels in one level
+uniform ivec3 vDimension;       // Voxel chunk size, how many voxels in each axis
+// uni_form vec3  vMin;         // Min Bounding for Voxel Chunk
+uniform sampler2D tex;
+
+out vec4 outColor;
+// #endregion
+
+// #region VOXEL ////////////////////////////////////////////////////////////////
+
+// Compute center point at voxel coordinate
+// vec3 coordMidPoint( ivec3 coord ){
+//     return vec3( coord ) * vCellSize + vMin + ( vCellSize * 0.5 );
+// }
+
+// Convert Index to Voxel Coordinate
+ivec3 idxCoord( int i ){
+    int y   = i / vXZCount;            // How Many Y Levels Can We Get?
+    int xz  = i - ( y * vXZCount );    // Subtract Y Levels from total, To get remaining Layer
+    int z   = xz / vDimension.x;       // How many rows in the last layer can we get?
+    int x   = xz - z * vDimension.x;   // With all the rows removed, how many left
+    return ivec3( x, y, z );
+}
+
+int coordIdx( ivec3 coord ){
+    // ( xLen * zLen * y ) + ( xLen * z ) + x
+    return vXZCount * coord.y + vDimension.x * coord.z + coord.x;
+}
+// #endregion
+
+const float iOn = 1.0; //1.0/255.0;
+
+void main(){
+    int idx  = int( gl_FragCoord.y ); // Single Pixel width, so Y is row index
+    vec4 px  = texelFetch( tex, ivec2( 0, idx ), 0 );
+    outColor = vec4( 0.0 ); // Default its off
+
+    if( px.a > 0.5 ){
+        outColor = vec4( iOn ); // Voxel is already active, Save as is
+    }else{
+        // Empty voxel will only be active if its exists between
+        // an Entry and Exit Voxel.
+        ivec3 coord = idxCoord( idx );
+        int idx;
+        vec4 p;
+        float d;
+        
+        // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+        // BACK EXIT TEST
+        bool hasBak = false;
+        for( int i = coord.z-1; i >= 0; i-- ){
+            coord.z = i;
+            idx     = coordIdx( coord );
+            p       = texelFetch( tex, ivec2( 0, idx ), 0 );
+
+            if( p.a > 0.5 ){
+                if( dot( normalize( p.xyz ), vec3(0.,0.,-1) ) > -0.1 ) hasBak = true;
+                break;
+            }
+        }
+
+        if( !hasBak ) return; // Exit early on failure
+
+        // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+        // FORWARD ENTRANCE TEST
+        bool hasFwd = false;
+        for( int i = coord.z+1; i < vDimension.z; i++ ){
+            coord.z = i;
+            idx     = coordIdx( coord );
+            p       = texelFetch( tex, ivec2( 0, idx ), 0 );
+
+            if( p.a > 0.5 ){
+                if( dot( normalize( p.xyz ), vec3(0.,0.,1) ) > -0.1 ) hasFwd = true;
+                break;
+            }
+        }
+
+        if( !hasFwd  ) return;
+
+        // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+        // Success
+        outColor = vec4( iOn );
+    }
+}`;
+
+const GP_BONE_INTER = `#version 300 es
+precision highp float;
+
+// #region DATA ////////////////////////////////////////////////////////////////
+
+uniform float vCellSize;    // Size of a voxel cell
+uniform int   vXZCount;     // How many voxels in one level
+uniform ivec3 vDimension;   // Voxel chunk size, how many voxels in each axis
+uniform vec3  vMin;         // Min Bounding for Voxel Chunk
+
+uniform sampler2D texVox;
+
+uniform int segCnt;
+uniform sampler2D texSeg;
+
+// flat out uvec3 vox;
+out uvec4 outColor;
+// #endregion
+
+// #region INTERSECTIONS ////////////////////////////////////////////////////////////////
+int point_aabb( vec3 p, vec3 min, vec3 max ){
+    return (
+        min.x <= p.x && p.x <= max.x &&
+        min.y <= p.y && p.y <= max.y &&
+        min.z <= p.z && p.z <= max.z
+    )? 1 : 0;
+}
+
+int segment_aabb( vec3 head, vec3 tail, vec3 bMin, vec3 bMax ){
+    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    // Test if either end is inside the box
+    if( point_aabb( head, bMin, bMax ) == 1 ) return 1;
+    if( point_aabb( tail, bMin, bMax ) == 1 ) return 1;
+
+    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    vec3 dir    = tail - head;
+    vec3 tMin   = ( bMin - head ) / dir;
+    vec3 tMax   = ( bMax - head ) / dir;
+    
+    vec3 t1     = min( tMin, tMax );
+    vec3 t2     = max( tMin, tMax );
+    float tNear = max( max( t1.x, t1.y ), t1.z );
+    float tFar  = min( min( t2.x, t2.y ), t2.z );
+
+    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~    
+    if( tNear < tFar ){
+
+        // Extra test where at least 1 side is within 0:1 range
+        // If both are outside then the segment doesn't intersect
+        // In Terms of a ray there is an intersection
+        if( 
+            ( tNear >=0.0 && tNear <= 1.0 ) ||
+            ( tFar  >=0.0 && tFar  <= 1.0 )
+        ) return 1;
+
+        // return 1; // Return true as a Ray instead of a segment
+    }
+
+    return 0;
+}
+// #endregion
+
+// #region SEGMENT DATA //////////////////////////////////////////////////////////////////
+struct Seg{
+    vec3 a;
+    vec3 b;
+};
+
+Seg getSegAt( int i ){
+    return Seg(
+        texelFetch( texSeg, ivec2( 0, i ), 0 ).rgb,
+        texelFetch( texSeg, ivec2( 1, i ), 0 ).rgb
+    );
+}
+// #endregion
+
+// #region VOXEL ////////////////////////////////////////////////////////////////
+
+// Compute center point at voxel coordinate
+// vec3 coordMidPoint( ivec3 coord ){
+//     return vec3( coord ) * vCellSize + vMin + ( vCellSize * 0.5 );
+// }
+
+// Calc the voxel bounding box
+void coordBounds( ivec3 coord, out vec3 bMin, out vec3 bMax ){
+    bMin = vec3( coord ) * vCellSize + vMin;
+    bMax = bMin + vCellSize;
+
+    // [[ NOTE ]]
+    // Add a smidge of buffer space for segments that
+    // are perflecty in the boundary of two voxels.
+    bMin -= vec3( 0.01 );
+    bMax += vec3( 0.01 );
+}
+
+// Convert Index to Voxel Coordinate
+ivec3 idxCoord( int i ){
+    int y   = i / vXZCount;            // How Many Y Levels Can We Get?
+    int xz  = i - ( y * vXZCount );    // Subtract Y Levels from total, To get remaining Layer
+    int z   = xz / vDimension.x;       // How many rows in the last layer can we get?
+    int x   = xz - z * vDimension.x;   // With all the rows removed, how many left
+    return ivec3( x, y, z );
+}
+
+int coordIdx( ivec3 coord ){
+    // ( xLen * zLen * y ) + ( xLen * z ) + x
+    return vXZCount * coord.y + vDimension.x * coord.z + coord.x;
+}
+// #endregion
+
+void main(){
+    int vIdx = int( gl_FragCoord.y );
+    vec4 px  = texelFetch( texVox, ivec2( 0, vIdx ), 0 );
+    outColor = uvec4( 0u );
+
+    if( px.x > 0.5 ){
+        outColor.x = 1u;
+
+        // Compute Voxel's bounding area
+        vec3 bMin   = vec3( 0.0 );
+        vec3 bMax   = vec3( 0.0 );
+        ivec3 coord = idxCoord( vIdx );
+        coordBounds( coord, bMin, bMax );
+
+        // Test each bone segment against the voxel
+        Seg seg;
+        int isHit;
+
+        uint boneCnt = 0u;
+        uint ii      = 0u;
+
+        for( int i=0; i < segCnt; i++ ){
+            seg     = getSegAt( i );
+            isHit   = segment_aabb( seg.a, seg.b, bMin, bMax );
+            if( isHit == 1 ){
+                boneCnt++;
+
+                // Convert to Uint & Increment Bone Index
+                ii = uint( i+1 ); 
+
+                // save up to 4 bones indices as uint16
+                // Paritions from the Y & Z UVEC3 components
+                if( boneCnt == 1u ){
+                    outColor.y = ii;
+                }else if( boneCnt == 2u ){
+                    outColor.y = ( ii << 16 ) | outColor.y;
+                }else if( boneCnt == 3u ){
+                    outColor.z = ii;
+                }else if( boneCnt == 4u ){
+                    outColor.z = ( ii << 16 ) | outColor.z;
+                }
+            }
+        }
+
+        // 16 Bit Partition, BoneCnt:IsVoxelActive
+        outColor.x = ( boneCnt << 16 ) | 1u;
+    }
+
+}`;
+
+const GP_CRAWL_INIT = `#version 300 es
+precision highp float;
+
+// #region DATA ////////////////////////////////////////////////////////////////
+uniform highp usampler2D tex;
+uniform uint  boneIndex;
+out vec4 outColor;
+// #endregion
+
+void main(){
+    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    int idx  = int( gl_FragCoord.y );
+    uvec3 px = texelFetch( tex, ivec2( 0, idx ), 0 ).rgb;
+    
+    // Even tho its just a Float out, must set GBA as 0,0,1, 
+    // else R gets effed up with anything else somehow???
+    // Vec2 & Vec3 doesn't work either, just Vec4.
+    outColor = vec4( 0., 0., 0., 1. );
+    
+    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    uint isVoxel = px.x & 65535u; // 0: Empty, 1:Solid
+    uint boneCnt = px.x >> 16;    // Total bones that intersect voxel
+    outColor.x   = -1.0;            // Start with solid voxel ready State
+
+    if( isVoxel == 0u ){
+        outColor.x = -10.0; // set as empty state
+
+    }else if( boneCnt > 0u ){
+        // Bone index is stored in vox buffer with a Plus 1
+        // Add one now to make testing easier with bitwise ops
+        uint bi = boneIndex + 1u;
+
+        // Test the 4 bone indices if any is ths selected one
+        if( 
+            ( px.y & 65535u ) == bi ||
+            ( px.y >> 16 )    == bi ||
+            ( px.z & 65535u ) == bi ||
+            ( px.z >> 16 )    == bi
+        ){
+            // Bone intersected voxel state as zero
+            // The crawl will replace all voxels set as -1
+            // with the distance from this initial voxel
+            outColor.x = 0.0;
+        }
+    }
+}`;
+
+const GP_CRAWL = `#version 300 es
+precision highp float;
+
+// #region DATA ////////////////////////////////////////////////////////////////
+uniform float vCellSize;    // Size of a voxel cell
+uniform int   vXZCount;     // How many voxels in one level
+uniform ivec3 vDimension;   // Voxel chunk size, how many voxels in each axis
+uniform vec3  vMin;         // Min Bounding for Voxel Chunk
+
+uniform highp sampler2D tex; // Data from previous pass
+
+out vec4 outColor;
+
+const ivec3[6] dirs = ivec3[6](
+    ivec3(  0,  1,  0 ), // up
+    ivec3(  0, -1,  0 ), // down
+    ivec3(  1,  0,  0 ), // right
+    ivec3( -1,  0,  0 ), // left
+    ivec3(  0,  0,  1 ), // forward
+    ivec3(  0,  0, -1 )  // back
+);
+// #endregion
+
+// #region VOXEL ////////////////////////////////////////////////////////////////
+
+// Compute center point at voxel coordinate
+vec3 coordMidPoint( ivec3 coord ){
+    return vec3( coord ) * vCellSize + vMin + ( vCellSize * 0.5 );
+}
+
+// Convert Index to Voxel Coordinate
+ivec3 idxCoord( int i ){
+    int y   = i / vXZCount;            // How Many Y Levels Can We Get?
+    int xz  = i - ( y * vXZCount );    // Subtract Y Levels from total, To get remaining Layer
+    int z   = xz / vDimension.x;       // How many rows in the last layer can we get?
+    int x   = xz - z * vDimension.x;   // With all the rows removed, how many left
+    return ivec3( x, y, z );
+}
+
+// Convert cvoxel coordinate to index
+int coordIdx( ivec3 coord ){
+    // ( xLen * zLen * y ) + ( xLen * z ) + x
+    return vXZCount * coord.y + vDimension.x * coord.z + coord.x;
+}
+
+bool isValidCoord( ivec3 c ){
+    return ( 
+        c.x >= 0 && c.x < vDimension.x &&
+        c.y >= 0 && c.y < vDimension.y &&
+        c.z >= 0 && c.z < vDimension.z
+    );
+}
+// #endregion
+
+void main(){
+    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    int idx  = int( gl_FragCoord.y );
+    float px = texelFetch( tex, ivec2( 0, idx ), 0 ).r;
+    
+    // Even tho its just a Float out, must set GBA as 0,0,1, 
+    // else R gets effed up with anything else somehow???
+    // Vec2 & Vec3 doesn't work either, just Vec4.
+    outColor = vec4( px, 0., 0., 1. );
+
+    // Skip any empty voxels, should be set as -10.0
+    // Float points arent precise values for equal tests
+    // So lets play it safe and test for -5 instead :)
+    if( px < -5.0 ) return;
+
+    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    // Traverse each neighbor voxel
+    ivec3 vCoord  = idxCoord( idx );
+    vec3  vMid    = coordMidPoint( vCoord );
+    float minDist = px;
+    
+    ivec3 nCoord;
+    int   nIdx;
+    float nDist;
+    float dist;
+    vec3  nMid;
+
+    for( int i=0; i < 6; i++ ){
+        // ---------------------------
+        // Only use valid voxel coordinates for neighbors
+        nCoord = vCoord + dirs[ i ];
+        if( !isValidCoord( nCoord ) ) continue;
+
+        // ---------------------------
+        // Look for neighor connected to a bone path
+        // If a voxel is set to -1, it is not part of
+        // a path
+        nIdx   = coordIdx( nCoord );
+        nDist  = texelFetch( tex, ivec2( 0, nIdx ), 0 ).r;
+        if( nDist < 0.0 ) continue;
+        
+        // ---------------------------
+        // Compute distance from bone using voxel 
+        // mid points plus neighbors distance
+        // This should compute total crawl distance
+        // traveled from the bone. 
+        nMid = coordMidPoint( nCoord );
+        dist = length( vMid - nMid ) + nDist;
+
+        minDist = ( minDist < 0.0 )  // If unused...
+            ? dist                   // Use computed distance
+            : min( minDist, dist );  // Else use shortest distance to bone
+    }
+
+    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    // Finalize
+    outColor.x = minDist;
+}`;
+
+const TF_VERTEX = `#version 300 es
+precision highp float;
+
+// #region DATA ////////////////////////////////////////////////////////////////
+layout(location=0) in vec3 position;
+
+uniform float vCellSize;    // Size of a voxel cell
+uniform int   vXZCount;     // How many voxels in one level
+uniform ivec3 vDimension;   // Voxel chunk size, how many voxels in each axis
+uniform vec3  vMin;         // Min Bounding for Voxel Chunk
+
+uniform highp sampler2D tex; // Data from previous pass
+
+flat out vec4 outWeight;
+flat out vec4 outIndex;
+// #endregion
+
+// #region VOXEL ////////////////////////////////////////////////////////////////
+
+// Compute center point at voxel coordinate
+vec3 coordMidPoint( ivec3 coord ){
+    return vec3( coord ) * vCellSize + vMin + ( vCellSize * 0.5 );
+}
+
+// Convert Index to Voxel Coordinate
+ivec3 idxCoord( int i ){
+    int y   = i / vXZCount;            // How Many Y Levels Can We Get?
+    int xz  = i - ( y * vXZCount );    // Subtract Y Levels from total, To get remaining Layer
+    int z   = xz / vDimension.x;       // How many rows in the last layer can we get?
+    int x   = xz - z * vDimension.x;   // With all the rows removed, how many left
+    return ivec3( x, y, z );
+}
+
+// Convert cvoxel coordinate to index
+int coordIdx( ivec3 coord ){
+    // ( xLen * zLen * y ) + ( xLen * z ) + x
+    return vXZCount * coord.y + vDimension.x * coord.z + coord.x;
+}
+
+bool isValidCoord( ivec3 c ){
+    return ( 
+        c.x >= 0 && c.x < vDimension.x &&
+        c.y >= 0 && c.y < vDimension.y &&
+        c.z >= 0 && c.z < vDimension.z
+    );
+}
+
+ivec3 posCoord( vec3 pos ){
+    return ivec3( floor( ( pos - vMin ) / vCellSize ) );
+}
+// #endregion
+
+void main(){
+    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    // int idx  = gl_VertexID; // int( gl_FragCoord.y );
+    // float px = texelFetch( tex, ivec2( 0, idx ), 0 ).r;
+
+    ivec3 coord = posCoord( position );
+    int   idx   = coordIdx( coord );
+    float px    = texelFetch( tex, ivec2( 0, idx ), 0 ).r;
+
+    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    outWeight = vec4( px );
+    outIndex  = vec4( 1.0 );
+}
+`;
+// #endregion
+
+
+// #region COPY COMPUTES
+const TF_COPY = `#version 300 es
+precision highp float;
+
+// #region DATA ////////////////////////////////////////////////////////////////
+layout(location=0) in uvec3 from;
+flat out uvec3 to;
+// #endregion
+
+void main(){
+    to = from;
+}`;
+
+const TF_COPY_F = `#version 300 es
+precision highp float;
+
+// #region DATA ////////////////////////////////////////////////////////////////
+layout(location=0) in float from;
+flat out float to;
+// #endregion
+
+void main(){
+    to = from;
+}`;
+
+const TF_COPY_TEX_F = `#version 300 es
+precision highp float;
+
+// #region DATA ////////////////////////////////////////////////////////////////
+uniform highp sampler2D tex;
+flat out float to;
+// #endregion
+
+void main(){
+    int idx = gl_VertexID;
+    vec4 px = texelFetch( tex, ivec2( 0, idx ), 0 );
+    
+    to = px.r;
+}`;
+
+const TF_COPY_TEX_U = `#version 300 es
+precision highp float;
+
+// #region DATA ////////////////////////////////////////////////////////////////
+uniform highp usampler2D tex;
+flat out uvec3 to;
+// #endregion
+
+void main(){
+    int idx  = gl_VertexID;
+    uvec4 px = texelFetch( tex, ivec2( 0, idx ), 0 );
+    
+    to = px.rgb;
+
+    // to = (px.x == 1u)? uvec3( 1.0 ) : uvec3( 0.0 );
+    // to = uvec3( 1.0 );
+}`;
+// #endregion
+
+
+// #region DEBUG VISUALIZERS
+function voxNormInstanceMaterial( chunk ){
+    const mat = new THREE.RawShaderMaterial({
+        side: THREE.DoubleSide,
+
+        uniforms    : {
+            vCellSize   : { type:'float', value:chunk.cellSize },
+            vXZCount    : { type:'int', value:chunk.xzCount },
+            vDimension  : { type:'ivec3', value:chunk.dimension },
+            vMin        : { type:'vec3', value:chunk.minBound },
+        },
+
+        // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+        vertexShader : `#version 300 es
+        precision highp float;
+
+        // #region DATA
+        in vec3 position;
+        in vec3 normal;
+        in uvec3 inst;
+
+        uniform mat4 modelMatrix;
+        uniform mat4 viewMatrix;
+        uniform mat4 projectionMatrix;
+
+        uniform float vCellSize;    // Size of a voxel cell
+        uniform int   vXZCount;     // How many voxels in one level
+        uniform ivec3 vDimension;   // Voxel chunk size, how many voxels in each axis
+        uniform vec3  vMin;         // Min Bounding for Voxel Chunk
+
+        out vec3 fragWPos;
+        out vec3 fragNorm;
+        out vec3 fragColor;
+        // #endregion
+
+        // #region VOXEL ////////////////////////////////////////////////////////////////////////
+
+        // Compute center point at voxel coordinate
+        vec3 coordMidPoint( ivec3 coord ){
+            return vec3( coord ) * vCellSize + vMin + ( vCellSize * 0.5 );
+        }
+
+        // Convert Index to Voxel Coordinate
+        ivec3 idxCoord( int i ){
+            int y   = i / vXZCount;            // How Many Y Levels Can We Get?
+            int xz  = i - ( y * vXZCount );    // Subtract Y Levels from total, To get remaining Layer
+            int z   = xz / vDimension.x;       // How many rows in the last layer can we get?
+            int x   = xz - z * vDimension.x;   // With all the rows removed, how many left
+            return ivec3( x, y, z );
+        }
+
+        // #endregion
+    
+        // #region QUAT
+
+        #define PI 3.1415926535897932384626433832795
+
+        // Quat * Vec3 - Rotates Vec3
+        vec3 quatVec( vec4 q, vec3 v ){
+            //return v + cross( 2.0 * q.xyz, cross( q.xyz, v) + q.w * v );  // Either Seems to Work, not sure which is the correct way to handle transformation
+            return v + 2.0 * cross( q.xyz, cross( q.xyz, v ) + q.w * v );
+        } 
+
+        vec4 quatAxisAngle( vec3 axis, float angle ){ 
+            vec4 qr;
+            float half_angle = ( angle * 0.5 );
+            qr.x = axis.x * sin(half_angle);
+            qr.y = axis.y * sin(half_angle);
+            qr.z = axis.z * sin(half_angle);
+            qr.w = cos(half_angle);
+            return qr;
+        }
+
+        vec4 quatSwing( vec3 a, vec3 b ){
+            // http://physicsforgames.blogspot.com/2010/03/Quat-tricks.html
+            float dot = dot( a, b );
+    
+            if( dot < -0.999999 ){ // 180 opposites
+                vec3 v = cross( vec3(1.,0.,0.), a ); // Maybe -1,0,0?
+    
+                if( length(v) < 0.000001 ) v = cross( vec3(0.,1.,0.), a );
+
+                return quatAxisAngle( normalize( v ), PI );
+            }else if( dot > 0.999999 ){ // Same Direction
+                return vec4( 0.0, 0.0, 0.0, 1.0 );
+            }else{
+                vec4 v = vec4( cross( a, b ), 1.0 + dot );
+                return normalize( v );
+            }
+        }
+        // #endregion
+
+        void main(){
+            if( (inst.x & 65535u) == 0u ){
+                // VOXEL OFF
+                gl_Position = vec4( 0.0 );
+            }else{
+                // VOXEL ON
+                // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+                // Voxel Position
+                ivec3 coord = idxCoord( gl_InstanceID );
+                vec3 voxMid = coordMidPoint( coord );
+
+                vec3 pos    = position * vCellSize + voxMid; // * float( inst )
+
+                // vec4 q      = quatSwing( vec3(0.,1., 0.), normalize( inst.xyz ) );
+                // vec3 pos    = quatVec( q, position );
+                // pos         = pos * vCellSize + voxMid;
+
+                // fragColor  = ( inst.y >= 1u )? vec3( 1.0, 1.0, 0.0 ) : vec3( 0.4 );
+
+                // bool isHit = ( inst.y == 2u )? true : false;
+                // bool isHit = ( ( inst.y >> 16 ) == 5u )? true : false;
+                // bool isHit = ( (( inst.x >> 16 ) & 65535u) == 4u )? true : false;
+                bool isHit = ( ( inst.x >> 16 ) == 1u )? true : false; // Bone Count
+                // bool isHit = ( ( inst.y & 65535u ) > 0u )? true : false;
+                // bool isHit = ( ( inst.y >> 16 ) > 0u )? true : false; // Has a second bone index
+                // bool isHit = ( ( inst.x >> 16 ) > 0u )? true : false; // Is Bone Intersected
+                // bool isHit = ( inst.x == 1u )? true : false;
+                fragColor  = ( isHit )? vec3( 1.0, 1.0, 0.0 ) : vec3( 0.4 );
+
+                // if( inst.y == 0u ) pos = vec3( 0.0 );
+                
+                // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+                // Output
+                vec4 wpos   = modelMatrix * vec4( pos , 1.0 );
+
+                fragWPos    = wpos.xyz;
+                fragNorm    = ( modelMatrix * vec4( normal, 0.0 ) ).xyz;
+
+                gl_Position = projectionMatrix * viewMatrix * wpos;
+            }
+        }`,
+
+        // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+        fragmentShader	: `#version 300 es
+        precision mediump float;
+                
+        out vec4 outColor;
+        in  vec3 fragWPos;
+        in  vec3 fragNorm;
+        in  vec3 fragColor;
+
+        ////////////////////////////////////////////////////////////////////////
+
+        void main(){
+            // outColor = vec4( 1.0, 0.0, 0.0, 1.0 );
+
+            // Lambert Lighting
+            vec3 lightWPos = vec3( 2.0, 10.0, 4.0 );
+            float NdL      = dot( fragNorm, normalize( lightWPos - fragWPos ) );
+            NdL            = NdL * 0.5 + 0.5;                    // Remap -1:0 to 0:1
+            NdL            = clamp( 0.0, 1.0, NdL );             // Help remove any midtone shadows, don't notice it using planes
+            NdL            = NdL * NdL;                          // Valve's Half Lambert, just curves the light value
+
+            outColor.a   = 1.0;
+            // outColor.rgb = vec3( 0.0, 1.0, 0.0 ) * NdL;
+            outColor.rgb = fragColor * NdL;
+        }`,
+    });
+
+    return mat;
+}
+
+function voxTestResults( chunk ){
+    const mat = new THREE.RawShaderMaterial({
+        side: THREE.DoubleSide,
+
+        uniforms    : {
+            vCellSize   : { type:'float', value:chunk.cellSize },
+            vXZCount    : { type:'int', value:chunk.xzCount },
+            vDimension  : { type:'ivec3', value:chunk.dimension },
+            vMin        : { type:'vec3', value:chunk.minBound },
+            vMaxDist    : { type:'float', value:0 },
+        },
+
+        // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+        vertexShader : `#version 300 es
+        precision highp float;
+
+        // #region DATA
+        in vec3 position;
+        in vec3 normal;
+        in float inst;
+
+        uniform mat4 modelMatrix;
+        uniform mat4 viewMatrix;
+        uniform mat4 projectionMatrix;
+
+        uniform float vCellSize;    // Size of a voxel cell
+        uniform int   vXZCount;     // How many voxels in one level
+        uniform ivec3 vDimension;   // Voxel chunk size, how many voxels in each axis
+        uniform vec3  vMin;         // Min Bounding for Voxel Chunk
+        uniform float vMaxDist;
+
+        out vec3 fragWPos;
+        out vec3 fragNorm;
+        out vec3 fragColor;
+        // #endregion
+
+        // #region VOXEL ////////////////////////////////////////////////////////////////////////
+
+        // Compute center point at voxel coordinate
+        vec3 coordMidPoint( ivec3 coord ){
+            return vec3( coord ) * vCellSize + vMin + ( vCellSize * 0.5 );
+        }
+
+        // Convert Index to Voxel Coordinate
+        ivec3 idxCoord( int i ){
+            int y   = i / vXZCount;            // How Many Y Levels Can We Get?
+            int xz  = i - ( y * vXZCount );    // Subtract Y Levels from total, To get remaining Layer
+            int z   = xz / vDimension.x;       // How many rows in the last layer can we get?
+            int x   = xz - z * vDimension.x;   // With all the rows removed, how many left
+            return ivec3( x, y, z );
+        }
+
+        // #endregion
+    
+        // #region QUAT
+
+        #define PI 3.1415926535897932384626433832795
+
+        // Quat * Vec3 - Rotates Vec3
+        vec3 quatVec( vec4 q, vec3 v ){
+            //return v + cross( 2.0 * q.xyz, cross( q.xyz, v) + q.w * v );  // Either Seems to Work, not sure which is the correct way to handle transformation
+            return v + 2.0 * cross( q.xyz, cross( q.xyz, v ) + q.w * v );
+        } 
+
+        vec4 quatAxisAngle( vec3 axis, float angle ){ 
+            vec4 qr;
+            float half_angle = ( angle * 0.5 );
+            qr.x = axis.x * sin(half_angle);
+            qr.y = axis.y * sin(half_angle);
+            qr.z = axis.z * sin(half_angle);
+            qr.w = cos(half_angle);
+            return qr;
+        }
+
+        vec4 quatSwing( vec3 a, vec3 b ){
+            // http://physicsforgames.blogspot.com/2010/03/Quat-tricks.html
+            float dot = dot( a, b );
+    
+            if( dot < -0.999999 ){ // 180 opposites
+                vec3 v = cross( vec3(1.,0.,0.), a ); // Maybe -1,0,0?
+    
+                if( length(v) < 0.000001 ) v = cross( vec3(0.,1.,0.), a );
+
+                return quatAxisAngle( normalize( v ), PI );
+            }else if( dot > 0.999999 ){ // Same Direction
+                return vec4( 0.0, 0.0, 0.0, 1.0 );
+            }else{
+                vec4 v = vec4( cross( a, b ), 1.0 + dot );
+                return normalize( v );
+            }
+        }
+        // #endregion
+
+        void main(){
+            if( inst <= -5.0 ){
+                // VOXEL OFF
+                gl_Position = vec4( 0.0 );
+            }else{
+                // VOXEL ON
+                // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+                // Voxel Position
+                ivec3 coord = idxCoord( gl_InstanceID );
+                vec3 voxMid = coordMidPoint( coord );
+
+                vec3 pos    = position * vCellSize + voxMid; // * float( inst )
+
+                // vec4 q      = quatSwing( vec3(0.,1., 0.), normalize( inst.xyz ) );
+                // vec3 pos    = quatVec( q, position );
+                // pos         = pos * vCellSize + voxMid;
+
+                // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+                // bool isHit = ( inst == 0.0 )? true : false;
+                // bool isHit = ( inst == -2.0 )? true : false;
+                // bool isHit = ( inst > 0.0 )? true : false;
+                // fragColor  = ( isHit )? vec3( 1.0, 1.0, 0.0 ) : vec3( 0.4 );
+
+                // if( inst == 0.0 ) fragColor = vec3( 0.0, 1.0, 0.0 );
+
+                fragColor = mix(
+                    vec3( 1.0, 0.0, 0.0 ),
+                    vec3( 0.0, 1.0, 1.0 ),
+                    pow( inst / vMaxDist, 0.7 )
+                );
+
+                if( inst == 0.0 ) fragColor = vec3( 0.0, 1.0, 0.0 );
+                if( inst < 0.0 ) fragColor = vec3( 1.0, 1.0, 1.0 );
+                
+                // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+                // Output
+                vec4 wpos   = modelMatrix * vec4( pos , 1.0 );
+
+                fragWPos    = wpos.xyz;
+                fragNorm    = ( modelMatrix * vec4( normal, 0.0 ) ).xyz;
+
+                gl_Position = projectionMatrix * viewMatrix * wpos;
+            }
+        }`,
+
+        // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+        fragmentShader	: `#version 300 es
+        precision mediump float;
+                
+        out vec4 outColor;
+        in  vec3 fragWPos;
+        in  vec3 fragNorm;
+        in  vec3 fragColor;
+
+        ////////////////////////////////////////////////////////////////////////
+
+        void main(){
+            // outColor = vec4( 1.0, 0.0, 0.0, 1.0 );
+
+            // Lambert Lighting
+            vec3 lightWPos = vec3( 2.0, 10.0, 4.0 );
+            float NdL      = dot( fragNorm, normalize( lightWPos - fragWPos ) );
+            NdL            = NdL * 0.5 + 0.5;                    // Remap -1:0 to 0:1
+            NdL            = clamp( 0.0, 1.0, NdL );             // Help remove any midtone shadows, don't notice it using planes
+            NdL            = NdL * NdL;                          // Valve's Half Lambert, just curves the light value
+
+            outColor.a   = 1.0;
+            // outColor.rgb = vec3( 0.0, 1.0, 0.0 ) * NdL;
+            outColor.rgb = fragColor * NdL;
+        }`,
+    });
+
+    return mat;
+}
+
+function weightMaterial(){
+    const mat = new THREE.RawShaderMaterial({
+    // depthTest       : true,
+    // side            : THREE.DoubleSide,
+    // transparent     : true, 
+    // forceSinglePass : true,             
+    // alphaToCoverage : true,             
+    // lights          : true,
+    uniforms        : {
+        vMaxDist     : { type: 'float', value:0 },
+    },
+    
+    vertexShader    : `#version 300 es
+    in vec3 position;
+    in vec3 normal;
+    in vec2 uv;
+    in vec4 skinWeight; // Bone Weights
+    in vec4 skinIndex;  // Bone Indices
+    
+    uniform mat4 modelMatrix;
+    uniform mat4 viewMatrix;
+    uniform mat4 projectionMatrix;
+
+    uniform float vMaxDist;
+
+    out vec3 fragColor;
+    out vec3 fragNorm;
+    out vec3 fragWPos;
+    out vec2 fragUV;
+
+    /////////////////////////////////////////////////////////////////
+
+    void main(){
+        // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+        vec3 pos    = position;
+
+        // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+        vec4 wPos   = modelMatrix * vec4( pos, 1.0 );
+        vec4 vPos   = viewMatrix * wPos;
+        fragWPos    = wPos.xyz;
+        fragUV      = uv;
+        fragNorm    = normal;
+
+        // fragColor   = ( skinWeight.x < 0.5 )? vec3( 1.0, 0.0, 0.0 ) : vec3( 0.0, 1.0, 0.0 );
+        float       t = skinWeight.x / vMaxDist;
+        fragColor   = mix(
+            vec3( 1.0, 0.0, 0.0 ),
+            vec3( 0.0, 1.0, 1.0 ),
+            pow( t, 0.7 )
+        );
+
+        if( skinWeight.x < 0.0 ){
+            fragColor = vec3( 1.0, 1.0, 1.0 );
+        }
+
+        // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+        gl_Position = projectionMatrix * vPos;
+    }`,
+	
+    fragmentShader  : `#version 300 es
+    precision mediump float;
+
+    in vec3 fragColor;
+    in vec3 fragNorm;
+    in vec3 fragWPos;
+    in vec2 fragUV;
+
+    out vec4  outColor;
+
+    ////////////////////////////////////////////////////////////////////////
+
+    const vec3 lightWPos = vec3( 2.0, 10.0, 4.0 );
+
+    void main(){
+        // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+        outColor = vec4( 1.0, 0.0, 0.0, 1.0 );
+
+        // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+        // Half Lambert Lighting
+        vec3  N   = normalize( cross( dFdx( fragWPos), dFdy( fragWPos ) ) ); //normalize( fragNorm );
+        float NdL = dot( N, normalize( lightWPos - fragWPos ) );
+        NdL       = NdL * 0.5 + 0.5;                    // Remap -1:0 to 0:1
+        NdL       = clamp( 0.0, 1.0, NdL );             // Help remove any midtone shadows, don't notice it using planes
+        NdL       = NdL * NdL;                          // Valve's Half Lambert, just curves the light value
+
+        // outColor.rgb = vec3( NdL );
+        // outColor.rgb = vec3( N );
+
+        // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+        // Final Lighting
+        // outColor.rgb = vec3( 1.0, 0.0, 0.0 ) * NdL;
+        outColor.rgb = fragColor * NdL;
+    }`
+    });
+
+    Object.defineProperty( mat, 'vMaxDist', { 
+        set: ( v )=>{ mat.uniforms.vMaxDist.value = v; } 
+    });
+
+    return mat;
+}
+// #endregion
+</script></body></html>
