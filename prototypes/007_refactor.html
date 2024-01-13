@@ -1,0 +1,440 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8" /><meta name="viewport" content="width=device-width, initial-scale=1.0" /><title></title></head>
+<style>canvas{ display:block; } body, html { padding:0px; margin:0px; width:100%; height:100%; }</style>
+<body><script src="../import-map.js"></script><script type="module"></script><script type="module">
+
+// #region IMPORTS
+import useThreeWebGL2, { THREE, useDarkScene, useVisualDebug } from '../lib/useThreeWebGL2.js';
+import Util         from './v1/Util.js';
+// #endregion
+
+// #region MAIN
+let App   = useDarkScene( useThreeWebGL2() );
+let Ref   = {};
+let Debug;
+
+function gltfLoaderAsync( url ){
+    return new Promise( ( resolve, reject )=>{
+        const loader = new GLTFLoader();
+        loader.load( url, resolve, null, reject );
+    });
+}
+
+window.addEventListener( 'load', async _=>{
+    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    // Setup
+    App.sphericalLook( 90, 20, 2, [0,0.3,0] );
+    Debug = await useVisualDebug( App );
+
+    GLContext.init( App.renderer.getContext() );
+    console.log( 'Max Texture Size:', GLContext.maxTexSize );
+
+    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    const gltf  = await Util.gltfLoaderAsync( './assets/war_sword.gltf' );
+    const shape = gltf.scene.children[ 0 ];
+    const skel  = buildSkeleton();  // debugSkeleton( skel, shape );
+
+    shape.position.z = 0.5;
+    App.scene.add( shape );
+    Ref.shape = shape;
+
+    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    Ref.skin = new AutoSkinning( App )
+        .useMesh( shape )
+        .useSkeleton( skel )
+        .setVoxel( 1, 1.01 )
+    ;
+
+    Ref.skin.debugVoxelChunk( true, false );
+    Ref.skin.compute();
+
+    // https://stackoverflow.com/questions/29975743/is-it-possible-to-use-webgl-max-texture-size
+    // gl.getParameter(gl.MAX_TEXTURE_SIZE);
+    // maxTextureSize = gl.getParameter(gl.MAX_TEXTURE_SIZE); As pointed out above many GPUs return 16384 as their max size. 
+    // 16384*16384*4 floats (a floating point texture) would be 4Gig. Many GPUs don't even have 4Gig of memor
+
+    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    initUI();
+    App.renderLoop();
+});
+
+function onElm( id, evtName, fn ){ 
+    if( Array.isArray( id ) ) for( let i of id ) document.getElementById( i ).addEventListener( evtName, fn );
+    else document.getElementById( id ).addEventListener( evtName, fn );
+}
+function initUI(){
+    onElm( 'inVoxDiv', 'change', e=>{
+        Ref.skin.setVoxel( parseInt( e.target.value ) );
+        // Ref.skin.debugVoxelChunk( true, true );
+    });
+
+    onElm( 'btnCompute', 'click', e=>{
+        Ref.skin.compute();
+    });
+
+    onElm( ['btnB0','btnB1','btnB2','btnB3'], 'click', e=>{
+        Ref.shape.material.boneIndex = parseInt( e.target.dataset.i );
+    });
+
+    onElm( 'inSmooth', 'change', e=>{
+        Ref.skin.setSmoothing( parseFloat( e.target.value ) );
+    });
+}
+// #endregion
+
+// #region HELPERS
+
+function buildSkeleton(){
+    const b0 = new THREE.Bone(); b0.position.set( 0,-0.25, 0 );
+    const b1 = new THREE.Bone(); b1.position.set( 0, 0.35, 0 ); b0.add( b1 );
+    const b2 = new THREE.Bone(); b2.position.set( 0, 0.25, 0 ); b1.add( b2 );
+    const b3 = new THREE.Bone(); b3.position.set( 0, 0.25, 0 ); b2.add( b3 );
+
+    const bones = [ b0, b1, b2, b3 ];
+    const skel  = new THREE.Skeleton( bones );
+    
+    return skel;
+}
+
+function debugSkeleton( skel, mesh ){
+    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    const bView = new THREE.SkeletonHelper( skel.bones[0] );
+    App.scene.add( bView );
+
+    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    // Skeleton can only be viewable if bound to a SkinnedMesh
+    // The mesh does not need to be added to the scene, just
+    // need bind to be run
+    const sMesh = new THREE.SkinnedMesh( mesh.geometry, new THREE.MeshPhongMaterial( { flatShading:true } ) );
+    sMesh.add( skel.bones[ 0 ] );
+    sMesh.bind( skel );
+}
+
+// #endregion
+
+import { GLContext, GPGPU, TransformFeedback, GLShader, GLBuffer, GLDataTexture } from '../lib/gl/index.js';
+import VoxelChunk       from '../lib/VoxelChunk.js';
+import Voxelizer        from './v1/Voxelizer.js';
+import VoxelBones       from './v1/VoxelBones.js';
+import VoxelCrawler     from './v1/VoxelCrawler.js';
+import VoxelWeight      from './v1/VoxelWeight.js';
+
+import VoxelDebug       from './v1/VoxelDebug.js';
+import VoxelBoneDebug   from './v1/VoxelBoneDebug.js';
+import VoxelCrawlDebug  from './v1/VoxelCrawlDebug.js';
+import VoxelCrawlVertDebug from './v1/VoxelCrawlVertDebug.js';
+import VertWeightDebug from './v1/VertWeightDebug.js';
+
+class AutoSkinning{
+    // #region MAIN
+    vox             = new VoxelChunk();
+    voxDivision     = 0;
+    skel            = null;     // Skeleton
+    mesh            = null;     // Mesh to skin
+    weightSmoothing = 1;        // 0:1 for falloff math
+
+    dtTriangles     = null;     // Convert geometry as a Data Texture that stores just triangles
+    dtSkeleton      = null;     // Convert skeleton to a Data Texture that stores bones as segments
+
+    voxelizer       = null;     // Voxelize Mesh Geometry
+    voxelBones      = null;     // Find which voxels intersect skeleton bones
+    voxelCrawler    = null;     // Compute geodesic distance of 1 bone at a time
+    voxelWeight     = null;
+
+    voxDebug        = null;
+    voxBoneDebug    = null;
+    voxCrawlDebug   = null;
+
+    constructor( app ){
+        this.app            = app;
+        this.voxelizer      = new Voxelizer( app );
+        this.voxelBones     = new VoxelBones( app );
+        this.voxelCrawler   = new VoxelCrawler( app );
+        this.voxelWeight    = new VoxelWeight( app );
+    }
+    // #endregion
+
+    // #region SETTERS
+
+    useMesh( m ){
+        // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+        this.mesh = m;
+        const geo = m.geometry;
+        /**/
+        // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+        // Add attributes to hold the final skinning data
+        // that should work within THREE.JS's SkinnedMesh
+        // The most we can store per vertex is 4 bones, so 
+        // setup buffers to use VEC4 data. We'll set to negative
+        // so we can tell which spot hasn't been filled.
+        const vCnt = geo.attributes.position.count;
+        geo.setAttribute( 'skinWeight', new THREE.BufferAttribute( new Float32Array(vCnt * 4).fill(-1), 4 ) );
+        geo.setAttribute( 'skinIndex',  new THREE.BufferAttribute( new Float32Array(vCnt * 4).fill(-1), 4 ) );
+
+        // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+        // Convert Mesh Geometry into a Data Texture that stores all the
+        // triangles into an easy to access format for the GPU. Since random
+        // access is needed, Texture is the best option available for WebGL 2
+        const verts     = geo.attributes.position.array;
+        const indie     = geo.index.array;
+        const triCnt    = indie.length / 3; // How many triangles in mesh, Each one will be a row in tex
+        console.log( 'Triangle Count:', triCnt );
+        console.log( 'Vertex Count:', verts.length / 3 );
+
+        // 3xN Texture using RGB. Each pixel in the row is a 
+        // local space position. So the data format is
+        // 3 Pixel Row = AX,AY,AZ, BX,BY,BZ, CX,CY,CZ,
+        const tex       = GLDataTexture.asFloat32( 3, triCnt, 3 ); // W, H, Component Count
+
+        let a, b, c, ii;
+        for( let i=0; i < triCnt; i++ ){
+            // --------------------------------
+            // Get index to vertex in flat array, Index * 3 = Flat Index
+            ii = i * 3;                 // Every 3 floats is one triangle
+            a  = indie[ ii+0 ] * 3;     // 1st Vertex Flat Index
+            b  = indie[ ii+1 ] * 3;     // 2st Vertex Flat Index
+            c  = indie[ ii+2 ] * 3;     // 3rd Vertex Flat Index
+
+            // --------------------------------
+            tex.setRaw( i,  // Row Index
+                verts[ a+0 ], verts[ a+1 ], verts[ a+2 ],   // 1st Vertex XYZ
+                verts[ b+0 ], verts[ b+1 ], verts[ b+2 ],   // 2nd Vertex XYZ
+                verts[ c+0 ], verts[ c+1 ], verts[ c+2 ],   // 3rd Vertex XYZ
+            );
+        }
+
+        tex.upload(); // Fill texture buffer with the flat buffer on the GPU
+        this.dtTriangles = tex;
+        
+        // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+        return this;
+    }
+
+    useSkeleton( skel, offset=0.25, debug=true ){
+        // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+        // Each bone needs to be reduce to TWO point segment in a 
+        // data texture since random read access is required for this data.
+        // The main idea is that each segment will be used on the GPU to
+        // perform a Segment/Ray VS AABB intersection tests.
+        // Data is laid out as 2 pixels per row in the RGB format per bone
+        const v     = new THREE.Vector3();
+        const tex   = GLDataTexture.asFloat32( 2, skel.bones.length, 3 ); // W:2, H:BoneCountl, RGB
+        console.log( 'Bone Count: ', skel.bones.length );
+    
+        // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+        // Fill texture with bone data converted to segments. Using the
+        // next bone as the segment's tail position. If a leaf bone then 
+        // tail position is computed with an UP offset from bone's head
+        // position
+        let cp; // Current Point
+        let np; // Next Point
+
+        for( let i=0; i < skel.bones.length; i++ ){
+            // -----------------------------------
+            cp = skel.bones[i].getWorldPosition( v ).toArray()
+            np = ( i < skel.bones.length-1 )
+                ? skel.bones[i+1].getWorldPosition( v ).toArray()   // Use next bone's point
+                : [ cp[0], cp[1]+offset, cp[2] ];                   // If no next bone, use an offset from current bone
+
+            tex.setRaw( i,
+                cp[ 0 ], cp[ 1 ], cp[ 2 ],  // Segment Point A
+                np[ 0 ], np[ 1 ], np[ 2 ],  // Segment Point B
+            );
+
+            // -----------------------------------
+            // Visually see the bone as segments
+            if( debug ){
+                Debug.pnt.add( cp, 0xffff00, 0.5 );
+                Debug.ln.add( cp, np, 0x00ff00 );
+            }
+        }
+
+        // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+        tex.upload();
+        this.dtSkeleton = tex;
+        this.skel       = skel;
+        return this;
+    }
+
+    setVoxel( subDiv=1, boundScale=1.01 ){
+        // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+        const geo = this.mesh.geometry;
+        const min = geo.boundingBox.min.toArray();
+        const max = geo.boundingBox.max.toArray();
+
+        this.vox.fitBound( min, max, subDiv, boundScale );
+        console.log( 'Voxel Cell Count:', this.vox.count );
+        console.log( 'voxel Sub-Division:', this.vox.division );
+
+        if( this.vox.count > GLContext.maxTexSize ){
+            console.error( 'Voxel count over texture size limit: %d : %d', this.vox.count, GLContext.maxTexSize );
+        }
+
+        // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+        // Remove any voxel based debug renderings
+        if( this.voxDebug ){
+            this.voxDebug.geometry.dispose();
+            this.app.scene.remove( this.voxDebug );
+            this.voxDebug = null;
+        }
+
+        if( this.voxBoneDebug ){
+            this.voxBoneDebug.geometry.dispose();
+            this.app.scene.remove( this.voxBoneDebug );
+            this.voxBoneDebug = null;
+        }
+        
+        if( this.voxCrawlDebug ){
+            this.voxCrawlDebug.geometry.dispose();
+            this.app.scene.remove( this.voxCrawlDebug );
+            this.voxCrawlDebug = null;
+        }
+
+        return this;
+    }
+
+    setSmoothing( i ){
+        this.weightSmoothing = i;
+        this.voxelWeight.computeSkinWeights( i );
+    }
+
+    // #endregion
+
+    // #region METHODS
+    compute(){
+        // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+        if( this.voxDivision !== this.vox.division ){
+            this.voxDivision = this.vox.division;
+
+            // -------------------------------------
+            // this.voxDebug = VoxelDebug( this.vox );
+            // this.app.scene.add( this.voxDebug );
+
+            // this.voxBoneDebug = new VoxelBoneDebug( this.vox );
+            // this.app.scene.add( this.voxBoneDebug );
+
+            this.voxCrawlDebug = new VoxelCrawlDebug( this.vox );
+            this.app.scene.add( this.voxCrawlDebug );
+
+            // -------------------------------------
+            // Need an extra render to make 3JS buffers available for use with compute Shaders
+            this.app.render(); 
+        }
+        
+        console.log( '## EXCUTE ###################################' );
+
+        // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+        // STEP 1 - Create a solid voxel shape from the mesh
+        this.voxelizer.execute( this.vox, this.dtTriangles );
+        // this.voxelizer.debugRawDataGPU();            // View Raw Pixel Data
+        // this.voxelizer.debugVoxelShellCount();       // Count how many voxels have been turned on
+        // this.voxelizer.debugShell( this.voxDebug );  // Visualize the voxels turned on
+        // this.voxelizer.debugSolid( this.voxDebug );  // Visualize the voxels turned on
+
+        // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+        // STEP 2 - Compute data texture that for each voxel which bones intersect it, 4 Bone Max storage
+        this.voxelBones.execute( this.vox, this.voxelizer.dtSolid, this.dtSkeleton );
+        // this.voxelBones.debugRawDataGPU(); // View Raw Pixel Data
+        // this.voxelBones.debugVoxels( this.voxBoneDebug );
+
+        // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+        // STEP 3 - Voxel Crawl
+        // const maxDist = ( this.vox.cellSize * this.vox.maxDimension() ) * 0.5;  // Half the distance of the largest dimension
+        const maxDist = this.vox.maxDistance();
+        const iter    = Math.ceil( this.vox.maxDimension() * 0.5 );             // Travel half of the max axis cell count
+        const boneCnt = this.skel.bones.length;
+
+        // Create or Create Buffers to store the accumulated vertex craw distance
+        this.voxelWeight.clear( this.mesh.geometry );
+
+        for( let boneIdx=0; boneIdx < boneCnt; boneIdx++ ){
+            // Execute voxel crawl for this bone
+            this.voxelCrawler.execute( this.vox, iter, boneIdx, this.voxelBones.dtVoxBones );
+            this.voxelCrawler.debugVoxels( this.voxCrawlDebug, maxDist );
+            
+            // Add results to vertex data
+            // Keeping track of the 4 shortest distances from a vertex to a bone
+            this.voxelWeight.accumlate( this.vox, this.voxelCrawler.dataTexture, boneIdx );
+        }
+
+        // this.voxelWeight.debugRawIndexGPUData();
+        // this.voxelWeight.debugRawWeightGPUData();
+
+        // VoxelCrawlVertDebug( this.mesh, maxDist );  // Attach debug material on mesh
+        // this.voxelWeight.debugMesh( this.mesh );    // Copy Vertex Distance to Mesh's Weight Attribute
+
+        // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+        // this.voxelWeight.computeSkinWeights( this.weightSmoothing );
+        // VertWeightDebug( this.mesh );  // Attach debug material on mesh
+    }
+    // #endregion
+
+    // #region DEBUGGING
+
+    debugVoxelChunk( seeBounds=true, seeCells=true ){
+        // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+        if( seeBounds ){
+            // Debug.ln.reset();
+            Debug.ln.box( this.vox.minBound, this.vox.maxBound, 0x00ffff );
+        }
+
+        // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+        if( seeCells ){
+            // Debug.pnt.reset();
+            let cor=[0,0,0], min=[0,0,0], max=[0,0,0];
+            for( let i=0; i < this.vox.count; i++ ){
+                this.vox.idxCoord( i, cor );
+
+                // this.vox.coordBound( cor, min, max );
+                // Debug.ln.box( min, max, 0x505050 );
+
+                this.vox.coordMidPoint( cor, min );
+                Debug.pnt.add( min, 0x505050, 0.5 );
+            }
+        }
+    }
+
+    // #endregion
+
+}
+
+</script>
+
+<style>
+    .container{ position: fixed; top:10px; left:10px; border:0px solid red; width:150px; }
+    .grp{ display:flex; flex-direction:column; }
+    .grp > * { margin:2px; }
+    .grp > label{ font-family:monospace; font-size:12px; color:white;}
+
+    .grp.tgap{ margin-top: 10px; }
+</style>
+
+<div class="container">
+    <section class="grp">
+        <label>Voxel Division</label>
+        <select id="inVoxDiv">
+            <option value="1">1</option>
+            <option value="2">2</option>
+            <option value="3">3</option>
+            <option value="4">4</option>
+            <option value="5">5</option>
+        </select>
+    </section>
+
+    <section class="grp">
+        <label>Weight Smoothing</label>
+        <input type="range" id="inSmooth" min="0" max="1" step="0.01" value="1.0"/>
+    </section>
+
+    <section class="grp">
+        <button id="btnCompute">Compute</button>
+    </section>
+
+    <section class="grp tgap">
+        <button id="btnB0" data-i="0">Bone 0</button>
+        <button id="btnB1" data-i="1">Bone 1</button>
+        <button id="btnB2" data-i="2">Bone 2</button>
+        <button id="btnB3" data-i="3">Bone 3</button>
+    </section>
+</div>
+
+</body></html>

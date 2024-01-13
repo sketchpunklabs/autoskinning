@@ -247,43 +247,127 @@ for( v in voxels ){
 }
 
 
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+5. Vertex Data
 
+Math: https://bitbucket.org/sketchpunk/sketchpunk.bitbucket.io/src/master/src/threejs/autoskinning/oito/armature/autoskin/VoxelGeodesic.js
 
-function buildSkeletonMesh( arm, geo, sWeights, sIndices ){
-    //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-    // Convert Armature to THREE.Skeleton
-    const bCnt  = arm.bones.length;
-    const bones = new Array( bCnt );
-    let   bn;
-    for( let b of arm.bones ){
-        bn = new THREE.Bone();
-        bn.position.fromArray( b.local.pos );
-        bn.quaternion.fromArray( b.local.rot );
+**Compute**
+Inputs
+- vec3 : Vertex Position
+- Voxel Chunk Info
+- dataTexture[R] : Results of voxel crawl, each voxel distance from a specific bone
 
-        bones[ b.idx ] = bn;
-        if( b.pidx != null ) bones[ b.pidx ].add( bn );
+Outputs
+- vec4 : Weights
+- vec4 : Indices
+
+**Notes**
+- Turn vertex position to voxel coordinate then to flat voxel index
+- With index at hand, get the pixel that represents that voxel data
+- Save distance to weight buffer
+-- Later version
+--- Fill in the vec4 till there is no more space available.
+--- If out of space, find the longest distance & if new bone
+    weight is less then it, then replace it.
+
+**Weights**
+D   = Product of BBox Extends, using VecLen( minPos, maxPos ) which is the diagnal distance
+distNormalized : dn = ( Distance + ( vertex - cellMidPoint ) ) / D;
+distNormalized : dn = ( voxelBoneDistance + ( vertex - voxelMidPoint ) ) / D;
+smooth = 0 <= X <= 1
+weight = ( 1 / (1-smooth)*dn + smooth*(dn^2) )^2
+
+Can add a filter on DN, like ignore any distance weight of <= 0.1
+
+Once distances for non-exterior voxels are calculated we can comppute skinning weights.
+To compute final mesh weights for each vertex used by Equation 4 we first start by performing 
+a hit test,using our previous computed mesh octree (cf. Section 4). This identifies the 
+corresponding voxel for each vertex. To compensate for the voxel grid’s coarseness, 
+and the fact that multiple vertices may fall in the same voxel, we add the distance between 
+the voxel center pvoxel and mesh vertex position pvertex to the current bone
+distances in the voxel d^iv, as shown in Figure 4.
+
+where α is a parameter in the range [0, 1] allowing animators to
+control bind smoothness. Increasing this parameter has the effect
+of reducing the overall influence of distant bones to the vertex, 
+creating a stiffer local bind. Note that distance values are normalized
+using the product of bounding box extents D, such that ee ≤ d^ij ≤ 1
+to make weights independent of mesh scale. We use the minimum
+distance ee to avoid numerical problems with Equation 8.
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// Add Vertex to Centroid Distance to Voxel Distance, then divide it by max possible distance for the chunk.
+const ndist = bones.map(i => { return Math.max(this.minDistance, i.distance + vlen) / this.maxDistance; });
+// For each Normalized Distance, Compute its overall weight with a smoothing factor
+const wgt = ndist.map(dist => { return (1 / ((1 - this.smooth) * dist + this.smooth * (dist ** 2))) ** 2; });
+// Total Weight of all Bones
+let sum = wgt.reduce((p, c) => p + c, 0);
+// Normalize Weight
+wgt.forEach((v, i, a) => a[i] /= sum);
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// Extra Filtering to limit bone influence
+// Remove bone influence if less then 0.1
+// NOTE: In weight paper there is a MIN DISTANCE that acts the same
+// as this by capping distNormalized between x & n
+const MIN_NWGT = 0.1;
+const minW = wgt.reduce((p, c) => Math.min(p, c), Infinity);
+if (minW < MIN_NWGT) {
+    wgt.forEach((v, i, a) => { if (v < 0.1)
+        a[i] = 0; }); // Set Zero on Specific Bones
+    sum = wgt.reduce((p, c) => p + c, 0); // Compute new Sum
+    wgt.forEach((v, i, a) => a[i] /= sum); // Normalize Again
+}
+
+###################################################################################
+###################################################################################
+###################################################################################
+
+class AutoSkinning{
+    vox             = new VoxelChunk();
+    skel            = null; // Skeleton
+    mesh            = null; // Mesh to skin
+    weightSmoothing = 1;    // 0:1 for falloff math
+
+    constructor(){}
+
+    // #region INITIALIZING
+    useMesh( m ){
+        - Get Bounding Box
+        - Turn Triangles into Data Texture
+        - Add skinWeight & skinIndex attributes to geometry
     }
 
-    const skel = new THREE.Skeleton( bones );               // Final Skeleton
-    gSkel = skel;
+    useSkeleton( skel ){
+        - Turn skeleton to DataTexture
+        -- Store each bone as a line Segment
+    }
 
-    const boneview = new THREE.SkeletonHelper( bones[0] );  // THREEJS's Version of Bone View
-    App.add( boneview );
+    setVoxel( subDiv=1, boundScale=1.01 ){
+        - Updates voxel chunk with a subdivision values
+        which will created how many voxels to fill the
+        mesh's bounding box
+    }
+    // #endregion
 
-    //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-    // Generate Geometry 
-    const bGeo = new THREE.BufferGeometry();
-    bGeo.setIndex( new THREE.BufferAttribute( geo.indices.data, 1 ) );
-    bGeo.setAttribute( 'position', new THREE.BufferAttribute( geo.position.data, geo.position.componentLen ) );
-    bGeo.setAttribute( 'skinWeight', new THREE.BufferAttribute( sWeights, 4 ) );
-    bGeo.setAttribute( 'skinIndex',  new THREE.BufferAttribute( sIndices, 4 ) );
+    // #region STEPS
+    s1_computeVoxelShell() :: GPGPU
+    s1_computeVoxelFill() :: GPGPU
 
-    //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-    // Create Mesh with Skeleton Bound to it.
-    const mat  = new THREE.MeshPhongMaterial( { flatShading:true } );
-    const mesh = new THREE.SkinnedMesh( bGeo, mat );
-    mesh.add( gSkel.bones[ 0 ] );
-    mesh.bind( gSkel );
+    s2_computeVoxelBoneIntersection() :: GPGPU
 
-    App.add( (gMesh = mesh) );
+    loop bone in skel{
+        s3_initVoxelCrawl() :: GPGPU
+        loop iter{ s3_voxelCrawl(); } :: GPGPU
+        s4_voxelDistWeight() :: TRANFORM_FEEDBACK
+    }
+
+    s5_computeVertexWeight(); TRANFORM_FEEDBACK
+    // #endregion
+
+    // #region DEBUGGING
+    debugVoxelGrid()                // Visualize the voxel grid
+    debugBoneWeight( boneIndex )    // Visualize vertex weights 
+    // #endregion
 }
