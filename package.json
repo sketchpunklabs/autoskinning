@@ -1,8 +1,8 @@
 {
 	"name"			: "autoskinning",
 	"version"		: "0.0.0.1",
-	"description"	: " game",
-	"keywords"		: [ "webgl", "threejs" ],
+	"description"	: "Autoskinning 3D Models using web technologies",
+	"keywords"		: [ "webgl", "threejs", "animation", "compute", "modeling" ],
 	"repository"	: { "url": "https://github.com/sketchpunklabs/autoskinning.git", "type": "git" },
 	"author"		: { "name": "Sketchpunk", "email": "tmp@tmp.com", "url": "http://tmp" },
 	"license"		: "MIT",
