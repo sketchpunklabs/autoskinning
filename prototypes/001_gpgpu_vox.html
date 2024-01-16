@@ -130,12 +130,13 @@ function geoToDataTexture( geo, gl ){
 class VoxVisualizer{
 
     static box( vox ){
+        const buf  = new Uint32Array( vox.count );
         const box  = new THREE.BoxGeometry( 1, 1, 1 ); 
         const iGeo = new THREE.InstancedBufferGeometry();
         iGeo.setIndex( Array.from( box.index.array ) ); // 3Js flips out, need to pass JS Array
         iGeo.setAttribute( 'position', box.attributes.position );
         iGeo.setAttribute( 'normal', box.attributes.normal );
-        iGeo.setAttribute( 'inst', new THREE.InstancedBufferAttribute( vox.cells, 1 ) );
+        iGeo.setAttribute( 'inst', new THREE.InstancedBufferAttribute( buf, 1 ) );
         iGeo.instanceCount = vox.count;
 
         const mat  = voxInstanceMaterial( vox );

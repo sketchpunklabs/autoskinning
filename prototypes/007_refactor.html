@@ -36,7 +36,7 @@ window.addEventListener( 'load', async _=>{
     shape.position.z = 0.5;
     App.scene.add( shape );
     Ref.shape = shape;
-
+    
     // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
     Ref.skin = new AutoSkinning( App )
         .useMesh( shape )
@@ -44,18 +44,43 @@ window.addEventListener( 'load', async _=>{
         .setVoxel( 1, 1.01 )
     ;
 
+    App.render();
+
     Ref.skin.debugVoxelChunk( true, false );
     Ref.skin.compute();
+
+
+    rebuildSkinnedClone();
+
+    Ref.sMesh.skeleton.bones[0].rotation.z = Math.PI * -0.25;
+    Ref.sMesh.skeleton.bones[1].rotation.z = Math.PI * 0.25;
+    Ref.sMesh.skeleton.bones[2].rotation.z = Math.PI * 0.25;
+    Ref.sMesh.skeleton.bones[3].rotation.z = Math.PI * 0.25;
 
     // https://stackoverflow.com/questions/29975743/is-it-possible-to-use-webgl-max-texture-size
     // gl.getParameter(gl.MAX_TEXTURE_SIZE);
     // maxTextureSize = gl.getParameter(gl.MAX_TEXTURE_SIZE); As pointed out above many GPUs return 16384 as their max size. 
     // 16384*16384*4 floats (a floating point texture) would be 4Gig. Many GPUs don't even have 4Gig of memor
-
+    
     // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
     initUI();
-    App.renderLoop();
+    // App.renderLoop();
+    App.createRenderLoop( onPreRender ).start();
 });
+
+function onPreRender( dt, et ){
+    if( Ref.sMesh ){
+
+        let t = et / 5;
+        let s = Math.sin( Math.PI * 2 * t );
+        let r = Math.PI * 0.30 * s;
+
+        Ref.sMesh.skeleton.bones[0].rotation.z = -r;
+        Ref.sMesh.skeleton.bones[1].rotation.z = r;
+        Ref.sMesh.skeleton.bones[2].rotation.z = r;
+        Ref.sMesh.skeleton.bones[3].rotation.z = r;
+    }
+}
 
 function onElm( id, evtName, fn ){ 
     if( Array.isArray( id ) ) for( let i of id ) document.getElementById( i ).addEventListener( evtName, fn );
@@ -72,11 +97,20 @@ function initUI(){
     });
 
     onElm( ['btnB0','btnB1','btnB2','btnB3'], 'click', e=>{
-        Ref.shape.material.boneIndex = parseInt( e.target.dataset.i );
+        const idx =  parseInt( e.target.dataset.i );
+        Ref.shape.material.boneIndex = idx;
+
+        if( Ref.skin.voxAccumDebug ){
+            Ref.skin.voxAccumDebug.material.boneIndex = idx;
+        }
     });
 
     onElm( 'inSmooth', 'change', e=>{
         Ref.skin.setSmoothing( parseFloat( e.target.value ) );
+    });
+
+    onElm( 'inMinWgt', 'change', e=>{
+        Ref.skin.setMinWeight( parseFloat( e.target.value ) );
     });
 }
 // #endregion
@@ -109,6 +143,73 @@ function debugSkeleton( skel, mesh ){
     sMesh.bind( skel );
 }
 
+function skinnedClone( mesh, skel ){
+    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    const bView = new THREE.SkeletonHelper( skel.bones[0] );
+    App.scene.add( bView );
+    Ref.bView = bView;
+
+    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    // Skeleton can only be viewable if bound to a SkinnedMesh
+    // The mesh does not need to be added to the scene, just
+    // need bind to be run
+    const sMesh = new THREE.SkinnedMesh( mesh.geometry, new THREE.MeshPhongMaterial( { flatShading:true } ) );
+    sMesh.add( skel.bones[ 0 ] );
+    sMesh.bind( skel );
+
+        
+    /*
+    const geo = new THREE.BufferGeometry();
+    const vCnt = mesh.geometry.attributes.position.count;
+    const bWgt = new Float32Array( vCnt * 4 );
+    const bIdx = new Float32Array( vCnt * 4 );
+
+    for( let i=0; i < vCnt; i++ ){
+        let ii = i * 4;
+        bWgt[ ii+0 ] = 1;
+        bWgt[ ii+1 ] = 0;
+        bWgt[ ii+2 ] = 0;
+        bWgt[ ii+3 ] = 0;
+
+        bIdx[ ii+0 ] = 0;
+        bIdx[ ii+1 ] = 0;
+        bIdx[ ii+2 ] = 0;
+        bIdx[ ii+3 ] = 0;
+    }
+
+    geo.setIndex( Array.from( mesh.geometry.index.array ) );
+    geo.setAttribute( 'position', new THREE.BufferAttribute( mesh.geometry.attributes.position.array, 3 ) );
+    geo.setAttribute( 'skinWeight', new THREE.BufferAttribute( bWgt, 4 ) );
+    geo.setAttribute( 'skinIndex',  new THREE.BufferAttribute( bIdx, 4 ) );
+
+    const sMesh = new THREE.SkinnedMesh( geo, new THREE.MeshPhongMaterial( { flatShading:true } ) );
+
+    sMesh.add( skel.bones[ 0 ] );
+    sMesh.bind( skel );
+    */
+    
+    return sMesh;
+}
+
+// The SkinnedMesh craps out with some kind of texture
+// error every time the GPU modifies the skinning buffers
+// BUT the geometry is ok. So for every compute, delete
+// the old mesh BUT leave geometry alone, just create 
+// a new mesh using the old geometry. Its a bandaid but
+// there is some issue with how 3JS handles skinning that
+// doesn't like the Weight & Indexes modified on the GPU
+function rebuildSkinnedClone(){
+    if( Ref.sMesh ){
+        App.scene.remove( Ref.sMesh );
+        App.scene.remove( Ref.bView );
+    }
+
+    Ref.sMesh = skinnedClone( Ref.shape, buildSkeleton() );
+    Ref.sMesh.position.z    = 0.25;
+    Ref.sMesh.frustumCulled = false;
+    App.scene.add( Ref.sMesh );
+}
+
 // #endregion
 
 import { GLContext, GPGPU, TransformFeedback, GLShader, GLBuffer, GLDataTexture } from '../lib/gl/index.js';
@@ -122,7 +223,8 @@ import VoxelDebug       from './v1/VoxelDebug.js';
 import VoxelBoneDebug   from './v1/VoxelBoneDebug.js';
 import VoxelCrawlDebug  from './v1/VoxelCrawlDebug.js';
 import VoxelCrawlVertDebug from './v1/VoxelCrawlVertDebug.js';
-import VertWeightDebug from './v1/VertWeightDebug.js';
+import VertWeightDebug  from './v1/VertWeightDebug.js';
+import VoxelAccumDebug  from './v1/VoxelAccumDebug.js';
 
 class AutoSkinning{
     // #region MAIN
@@ -131,6 +233,8 @@ class AutoSkinning{
     skel            = null;     // Skeleton
     mesh            = null;     // Mesh to skin
     weightSmoothing = 1;        // 0:1 for falloff math
+    minWeight       = 0.0;
+    maxDist         = 0;
 
     dtTriangles     = null;     // Convert geometry as a Data Texture that stores just triangles
     dtSkeleton      = null;     // Convert skeleton to a Data Texture that stores bones as segments
@@ -143,6 +247,7 @@ class AutoSkinning{
     voxDebug        = null;
     voxBoneDebug    = null;
     voxCrawlDebug   = null;
+    voxAccumDebug   = null;
 
     constructor( app ){
         this.app            = app;
@@ -167,8 +272,8 @@ class AutoSkinning{
         // setup buffers to use VEC4 data. We'll set to negative
         // so we can tell which spot hasn't been filled.
         const vCnt = geo.attributes.position.count;
-        geo.setAttribute( 'skinWeight', new THREE.BufferAttribute( new Float32Array(vCnt * 4).fill(-1), 4 ) );
-        geo.setAttribute( 'skinIndex',  new THREE.BufferAttribute( new Float32Array(vCnt * 4).fill(-1), 4 ) );
+        geo.setAttribute( 'skinWeight', new THREE.BufferAttribute( new Float32Array(vCnt * 4).fill(0), 4 ) );
+        geo.setAttribute( 'skinIndex',  new THREE.BufferAttribute( new Float32Array(vCnt * 4).fill(0), 4 ) );
 
         // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
         // Convert Mesh Geometry into a Data Texture that stores all the
@@ -289,12 +394,23 @@ class AutoSkinning{
             this.voxCrawlDebug = null;
         }
 
+        if( this.voxAccumDebug ){
+            this.voxAccumDebug.geometry.dispose();
+            this.app.scene.remove( this.voxAccumDebug );
+            this.voxAccumDebug = null;
+        }
+
         return this;
     }
 
     setSmoothing( i ){
         this.weightSmoothing = i;
-        this.voxelWeight.computeSkinWeights( i );
+        this.voxelWeight.computeSkinWeights( this.weightSmoothing, this.minWeight, this.maxDist );
+    }
+
+    setMinWeight( i ){
+        this.minWeight = i;
+        this.voxelWeight.computeSkinWeights( this.weightSmoothing, this.minWeight, this.maxDist );
     }
 
     // #endregion
@@ -312,8 +428,11 @@ class AutoSkinning{
             // this.voxBoneDebug = new VoxelBoneDebug( this.vox );
             // this.app.scene.add( this.voxBoneDebug );
 
-            this.voxCrawlDebug = new VoxelCrawlDebug( this.vox );
-            this.app.scene.add( this.voxCrawlDebug );
+            // this.voxCrawlDebug = new VoxelCrawlDebug( this.vox );
+            // this.app.scene.add( this.voxCrawlDebug );
+
+            this.voxAccumDebug = new VoxelAccumDebug( this.vox );
+            this.app.scene.add( this.voxAccumDebug );
 
             // -------------------------------------
             // Need an extra render to make 3JS buffers available for use with compute Shaders
@@ -339,17 +458,17 @@ class AutoSkinning{
         // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
         // STEP 3 - Voxel Crawl
         // const maxDist = ( this.vox.cellSize * this.vox.maxDimension() ) * 0.5;  // Half the distance of the largest dimension
-        const maxDist = this.vox.maxDistance();
+        this.maxDist = this.vox.maxDistance();
         const iter    = Math.ceil( this.vox.maxDimension() * 0.5 );             // Travel half of the max axis cell count
         const boneCnt = this.skel.bones.length;
 
         // Create or Create Buffers to store the accumulated vertex craw distance
-        this.voxelWeight.clear( this.mesh.geometry );
+        this.voxelWeight.clear( this.mesh.geometry, this.vox );
 
         for( let boneIdx=0; boneIdx < boneCnt; boneIdx++ ){
             // Execute voxel crawl for this bone
             this.voxelCrawler.execute( this.vox, iter, boneIdx, this.voxelBones.dtVoxBones );
-            this.voxelCrawler.debugVoxels( this.voxCrawlDebug, maxDist );
+            // this.voxelCrawler.debugVoxels( this.voxCrawlDebug, maxDist );
             
             // Add results to vertex data
             // Keeping track of the 4 shortest distances from a vertex to a bone
@@ -358,13 +477,23 @@ class AutoSkinning{
 
         // this.voxelWeight.debugRawIndexGPUData();
         // this.voxelWeight.debugRawWeightGPUData();
+        // this.voxelWeight.debugRawVoxIndexGPUData();
+        // this.voxelWeight.debugRawVoxWeightGPUData();
+        this.voxelWeight.debugVoxels( this.voxAccumDebug, this.maxDist, this.voxelCrawler.dataTexture );
 
         // VoxelCrawlVertDebug( this.mesh, maxDist );  // Attach debug material on mesh
         // this.voxelWeight.debugMesh( this.mesh );    // Copy Vertex Distance to Mesh's Weight Attribute
 
         // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-        // this.voxelWeight.computeSkinWeights( this.weightSmoothing );
-        // VertWeightDebug( this.mesh );  // Attach debug material on mesh
+        this.voxelWeight.computeSkinWeights( this.weightSmoothing, this.minWeight, this.maxDist );
+        VertWeightDebug( this.mesh );  // Attach debug material on mesh
+
+        rebuildSkinnedClone();
+
+        // this.read3JSBuf( this.mesh.geometry.attributes.skinIndex );
+        // this.read3JSBuf( this.mesh.geometry.attributes.skinWeight );
+
+        // this.debugFinalRaw( this.mesh );
     }
     // #endregion
 
@@ -393,6 +522,44 @@ class AutoSkinning{
         }
     }
 
+    debugFinalRaw( mesh ){
+        const attr = mesh.geometry.attributes;
+
+        const w  = this.read3JSBuf( attr.skinWeight );
+        const i  = this.read3JSBuf( attr.skinIndex );
+
+        for( let j=0; j < w.length; j+=4 ){
+            console.log(
+                'INDEX',
+                i[j+0], i[j+1], i[j+2], i[j+3],
+                'WEIGHT',
+                w[j+0], w[j+1], w[j+2], w[j+3]
+            );
+        }
+
+    }
+
+    read3JSBuf( buf ){
+        const atr = App.renderer.attributes.get( buf );
+        if( !atr ){ console.log( 'Attribute reference not found in 3js renderer', k ); return; }
+
+
+        const gl  = GLContext.ctx;
+        const cnt = buf.count * 4;
+        const t   = new Float32Array( cnt ); 
+
+        gl.bindBuffer( WebGL2RenderingContext.ARRAY_BUFFER, atr.buffer );
+        // gl.getBufferSubData( WebGL2RenderingContext.ARRAY_BUFFER, 0, t, 0, cnt );
+        gl.getBufferSubData( WebGL2RenderingContext.ARRAY_BUFFER, 0, t );
+        gl.bindBuffer( WebGL2RenderingContext.ARRAY_BUFFER, null );
+
+        // for( let i=0; i < t.length; i+=4 ){
+        //     console.log( t[i+0], t[i+1], t[i+2], t[i+3] );
+        // }
+
+        return t;
+    }
+
     // #endregion
 
 }
@@ -404,7 +571,7 @@ class AutoSkinning{
     .grp{ display:flex; flex-direction:column; }
     .grp > * { margin:2px; }
     .grp > label{ font-family:monospace; font-size:12px; color:white;}
-
+    .grp > p { color:white; }
     .grp.tgap{ margin-top: 10px; }
 </style>
 
@@ -426,14 +593,28 @@ class AutoSkinning{
     </section>
 
     <section class="grp">
+        <label>Min Weight</label>
+        <input type="range" id="inMinWgt" min="0" max="1" step="0.01" value="0.0"/>
+    </section>
+
+    <section class="grp">
         <button id="btnCompute">Compute</button>
     </section>
 
     <section class="grp tgap">
-        <button id="btnB0" data-i="0">Bone 0</button>
-        <button id="btnB1" data-i="1">Bone 1</button>
-        <button id="btnB2" data-i="2">Bone 2</button>
         <button id="btnB3" data-i="3">Bone 3</button>
+        <button id="btnB2" data-i="2">Bone 2</button>
+        <button id="btnB1" data-i="1">Bone 1</button>
+        <button id="btnB0" data-i="0">Bone 0</button>
+    </section>
+
+    <section class="grp">
+        <p>Weight Colors:</p>
+        <p>- Red: 100%</p>
+        <p>- Green: 50%</p>
+        <p>- Blue: 0% < 50%</p>
+        <p>- Black: Equals 0%</p>
+        <p>- Yellow: No Bone</p>
     </section>
 </div>
 

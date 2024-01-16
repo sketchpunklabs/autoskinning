@@ -1,24 +1,138 @@
-<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8" /><meta name="viewport" content="width=device-width, initial-scale=1.0" /><title></title></head>
-<style>canvas{ display:block; } body, html { padding:0px; margin:0px; width:100%; height:100%; background-color:black; }</style>
-<body><script src="./import-map.js"></script><script type="module">
-// #region IMPORTS
-import App from './src/App.js';
-// #endregion
+<!DOCTYPE html><html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Auto Skinning</title>
+    <style>
+        *{ font-family: monospace; font-size:16px; }
+        body{ display:flex; flex-direction:column; align-items:center; }
+        div{ width:75vw; }
+        hr{ border-top:2px dotted gray; height:0px; }
+        h1{ font-size:20px; }
+        a{ text-decoration:none; color:orangered; }
+        a:hover{ color: orange; }
 
-// #region MAIN
-const app = new App();
-window.addEventListener( 'load', async _=>{
-    app.renderLoop.start();
-});
-// #endregion
-</script>
+        li{ margin-bottom: 8px; }
+        li p{ margin: 2px 0px 4px 0px; color:#505050;}
 
-<a href="https://github.com/sketchpunklabs/tetris" target="_blank" aria-label="View source on Github" style="position:fixed; right:0px; top:0px;">
-    <svg viewBox="0 0 250 250" aria-hidden="true" style="width:70px;">
-        <path fill="#ffffff40" d="M0,0 L115,115 L130,115 L142,142 L250,250 L250,0 Z"></path>
-        <path fill="#3A3A3A" d="M128.3,109.0 C113.8,99.7 119.0,89.6 119.0,89.6 C122.0,82.7 120.5,78.6 120.5,78.6 C119.2,72.0 123.4,76.3 123.4,76.3 C127.3,80.9 125.5,87.3 125.5,87.3 C122.9,97.6 130.6,101.9 134.4,103.2" style="transform-origin: 130px 106px;"></path>
-        <path fill="#3A3A3A" d="M115.0,115.0 C114.9,115.1 118.7,116.5 119.8,115.4 L133.7,101.6 C136.9,99.2 139.9,98.4 142.2,98.6 C133.8,88.0 127.5,74.4 143.8,58.0 C148.5,53.4 154.0,51.2 159.7,51.0 C160.3,49.4 163.2,43.6 171.4,40.1 C171.4,40.1 176.1,42.5 178.8,56.2 C183.1,58.6 187.2,61.8 190.9,65.4 C194.5,69.0 197.7,73.2 200.1,77.6 C213.8,80.2 216.3,84.9 216.3,84.9 C212.7,93.1 206.9,96.0 205.4,96.6 C205.1,102.4 203.0,107.8 198.3,112.5 C181.9,128.9 168.3,122.5 157.7,114.1 C157.9,116.9 156.7,120.9 152.7,124.9 L141.0,136.5 C139.8,137.7 141.6,141.9 141.8,141.8 Z"></path>
-    </svg>
-</a>
+        p.dim{ color:#606060; }
+    </style>
+</head>
+<body>
 
-</body></html>
+<div>
+    <h1>Auto Skinning</h1>
+    <div>
+        <p class="dim">
+            This repo will house various experiments on using web techologies to auto skinning 3D meshes. The process
+            requires heavy number crunching, so this process uses the GPU to execute several compute shaders
+            the produce the final vertex bone indices & weights. To start, its using raw WebGL over a Three.JS GL Context
+            to execute all the compute shaders. Most of the steps use GPGPU & Data Textures for computations as there
+            is a need for random read access which can only be done using texture lookups. The rest uses TransformFeedback
+            and GL buffers for computations & data storage.
+        </p>
+    
+        <p class="dim">
+            Ultimately, the purpose of this repo is for prototyping one of the building blocks for creating a web application
+            similar to Adobe's Mixamo. If an app is able to use the user's GPU for the heavy lifting, then there is no need to
+            have a backend service to perform that process. Couple this with IK Animation retargeting thats already prototyped,
+            its quite possible to build a mixamo clone that runs everything on the front end.
+        </p>
+    
+        <p>
+            <b>Source Code</b> : <a href="https://github.com/sketchpunklabs/autoskinning">https://github.com/sketchpunklabs/autoskinning</a>
+        </p>
+    </div>
+
+    <hr>
+
+    <table width="100%" cellspacing="5"><tr><td width="50%" valign="top">
+        <b>WebGL ( ThreeJS ) Prototypes</b>
+        <ul>
+
+            <li><a href="./prototypes/007_refactor.html">Refactor : First complete GPU Prototype</a>
+                <p>Recoding all the prototypes into a semi-messy API that executes the entire process onto
+                    a mesh. Various visual debugging is available plus the mesh is then animated as a
+                    final test if skinning data is usable.</p>
+            </li>
+
+            <li><a href="./prototypes/006_vertex_data.html">Compute vertex data</a>
+                <p>With voxel to bone distances known, this prototype then applies it to vertices. For each vertex,
+                    we find which voxel its resides in then adds its distance to the voxel's mid point as
+                    shortest path from the vertex to a bone.</p>
+            </li>
+
+            <li><a href="./prototypes/005_voxel_crawl.html">Compute voxel crawl</a>
+                <p>With the Voxel-Bone intersection as the starting point, the crawl will then step iterate
+                    threw out the voxel chunk turning on neighboring voxels that are connected on a path to
+                a bone. Each voxel gets assigned the shortest distance to the bone.</p>
+            </li>
+
+            <li><a href="./prototypes/004_raycast_bones.html">Raycast for procedural skeleton generation</a>
+                <p>This is a side prototype for procedurally setting up a skeleton on a mesh using
+                    2D points. These points will then be turned into raycasts that will find the 
+                    entry &amp; exit positions when it intersects a mesh. It then computes the center
+                    of the two points as the final position for a bone.
+                </p>
+            </li>
+
+            <li><a href="./prototypes/003_vox_bone_intersect_gltf.html">Compute Voxel-Bone Intersection with GLTF Mesh</a>
+                <p>Same as previous, but this time using a 3D model of a sworld</p>
+            </li>
+            
+            <li><a href="./prototypes/003_vox_bone_intersect.html">Compute Voxel-Bone Intersection</a>
+                <p>This prototype turns skeleton data into a data texture that then a compute shader uses
+                    for voxel intersection testing on the solid voxel shape from the previous prototype.
+                    This step is to find all the voxels that containing any of the bones.
+                </p>
+            </li>
+
+
+            <li><a href="./prototypes/002_vox_fill_2.html">Compute voxel fill</a>
+                <p>Previous prototype creates a voxel shell, for auto skinning this shell needs to be filled in.
+                    So this prototype goes threw & tries to fill in all the empty space inside the voxel shape.
+                </p>
+            </li>
+
+            <li><a href="./prototypes/001_gpgpu_vox_norm.html">Compute voxelize a mesh &amp; debug normals</a>
+                <p>Same as before, this time storing the average normal of all the triangles inside a voxel.
+                    The data is then visualized for debugging. Normal data is needed for the next step in 
+                    auto skinning. 
+                </p>
+            </li>
+
+            <li><a href="./prototypes/001_gpgpu_vox.html">Compute voxelize a mesh</a>
+                <p>This prototype turnes a mesh into a data texture that then can be used by a compute
+                    shader that will then create voxel data. The resulting voxel data is then visualized for debugging.
+                </p>
+            </li>
+
+            <li><a href="./prototypes/000_gpgpu.html">GPGPU & DataTextures</a>
+                <p>Implementing a simple API to execute shaders as compute that saves results into a data texture. 
+                Shader & Texture objects created using raw WebGL code that ties into ThreeJS's GL Context</p>
+            </li>
+        </ul>
+    </td><td width="50%" valign="top">
+        <b>WebGPU Prototypes</b>
+        <ol>
+            <li>Coming when I have time</li>
+        </ol>
+    </td></tr></table>
+
+    <hr>
+
+    <b>Resources</b>
+    <ol>
+        <li><a href="https://x.com/_naam/status/1436730675319672832?s=20" target="_blank">@_naam twitter post that inspired this work</a></li>
+        <li><a href="http://www.delasa.net/data/sca2013_voxelization.pdf" target="_blank">White Paper : Geodesic Voxel Binding for Production Character Meshes</a></li>
+        <li><a href="https://bitbucket.org/sketchpunk/sketchpunk.bitbucket.io/src/master/src/threejs/autoskinning/index.html" target="_blank">CPU Prototype based on white paper</a></li>
+        <li><a href="http://blog.wolfire.com/2009/11/volumetric-heat-diffusion-skinning/" target="_blank">Wolfire Volumetric Head Diffusion Skinning</a></li>
+        <li><a href="http://blog.wolfire.com/2009/11/Triangle-mesh-voxelization" target="_blank">Wolfire Triangle-Mesh Voxelization</a></li>
+        <li><a href="https://bronsonzgeb.com/index.php/2021/06/26/volumetric-heat-diffusion-for-automatic-mesh-skinning/" target="_blank">Bronsonzgeb - Automatic Mesh Skinning in Unity ( Incomplete )</a></li>
+        <li><a href="https://webglfundamentals.org/webgl/lessons/webgl-gpgpu.html" target="_blank">WebGL - GPGPU Tutorial</a></li>
+    </ol>
+
+</div>
+
+</body>
+</html> 

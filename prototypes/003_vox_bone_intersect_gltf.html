@@ -101,7 +101,7 @@ window.addEventListener( 'load', async _=>{
     // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
     // #region SETUP VOXEL GRID
     /**/
-    const vox       = new VoxelChunk().fitBound( gMin, gMax, 2, 1.01 );
+    const vox       = new VoxelChunk().fitBound( gMin, gMax, 4, 1.01 );
     const voxMesh   = VoxVisualizer.plane( vox );
     App.scene.add( voxMesh );
     
@@ -524,6 +524,61 @@ int coordIdx( ivec3 coord ){
 }
 // #endregion
 
+// #region TRAVERAL /////////////////////////////////////////////////////////////
+const float DOTLMT = -0.1;
+
+const vec3  FWD    = vec3( 0.0, 0.0,  1.0 );
+const vec3  BAK    = vec3( 0.0, 0.0, -1.0 );
+
+const vec3  RIT    = vec3(  1.0, 0.0, 0.0 );
+const vec3  LFT    = vec3( -1.0, 0.0, 0.0 );
+
+// Traverse voxel axis checking if an empty voxel exists
+// between an exit and entry voxel. This is done by testing
+// the voxel's average triangle normal. If it does not, 
+// the voxel lives outside the shell instead of inside.
+bool taverseAxis( in ivec3 coord, vec3 nDir, vec3 pDir, int axis ){
+    ivec3 c     = coord;    // Coordinate to modify in loops
+    bool hasHit = false;  
+    vec4 p;
+    int idx;
+    
+    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    // NEGATIVE DIRECTION
+    for( int i = coord[axis]-1; i >= 0; i-- ){
+        c[axis] = i;
+        idx     = coordIdx( c );
+        p       = texelFetch( tex, ivec2( 0, idx ), 0 );
+
+        if( p.w > 0.5 ){
+            if( dot( normalize( p.xyz ), nDir ) > DOTLMT ) hasHit = true;
+            break;
+        }
+    }
+
+    if( !hasHit ) return false; // Exit early on failure
+
+    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    // POSITIVE DIRECTION
+    hasHit = false;
+    for( int i = coord[axis]+1; i < vDimension[axis]; i++ ){
+        c[axis] = i;
+        idx     = coordIdx( c );
+        p       = texelFetch( tex, ivec2( 0, idx ), 0 );
+
+        if( p.w > 0.5 ){
+            if( dot( normalize( p.xyz ), pDir ) > DOTLMT ) hasHit = true;
+            break;
+        }
+    }
+
+    if( !hasHit  ) return false;
+
+    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    return true;
+}
+// #endregion
+
 const float iOn = 1.0; //1.0/255.0;
 
 void main(){
@@ -537,45 +592,65 @@ void main(){
         // Empty voxel will only be active if its exists between
         // an Entry and Exit Voxel.
         ivec3 coord = idxCoord( idx );
-        int idx;
-        vec4 p;
-        float d;
+        
+        // int idx;
+        // vec4 p;
+        // float d;
         
         // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
         // BACK EXIT TEST
-        bool hasBak = false;
-        for( int i = coord.z-1; i >= 0; i-- ){
-            coord.z = i;
-            idx     = coordIdx( coord );
-            p       = texelFetch( tex, ivec2( 0, idx ), 0 );
+        // bool hasBak = false;
+        // for( int i = coord.z-1; i >= 0; i-- ){
+        //     coord.z = i;
+        //     idx     = coordIdx( coord );
+        //     p       = texelFetch( tex, ivec2( 0, idx ), 0 );
 
-            if( p.a > 0.5 ){
-                if( dot( normalize( p.xyz ), vec3(0.,0.,-1) ) > -0.1 ) hasBak = true;
-                break;
-            }
+        //     if( p.a > 0.5 ){
+        //         if( dot( normalize( p.xyz ), vec3(0.,0.,-1) ) > -0.1 ) hasBak = true;
+        //         break;
+        //     }
+        // }
+
+        // if( !hasBak ) return; // Exit early on failure
+
+        // // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+        // // FORWARD ENTRANCE TEST
+        // bool hasFwd = false;
+        // for( int i = coord.z+1; i < vDimension.z; i++ ){
+        //     coord.z = i;
+        //     idx     = coordIdx( coord );
+        //     p       = texelFetch( tex, ivec2( 0, idx ), 0 );
+
+        //     if( p.a > 0.5 ){
+        //         if( dot( normalize( p.xyz ), vec3(0.,0.,1) ) > -0.1 ) hasFwd = true;
+        //         break;
+        //     }
+        // }
+
+        // if( !hasFwd  ) return;
+
+        // ** NOTE **
+        // Originally only doing test on the Z Axis seemed to work
+        // but at heigher resolutions there are some small gaps found.
+        // Testing on the X and Z axis seems to do the job of filling
+        // in the gaps. The original paper mention they did all 3 axis
+        // so if there is a future problem with gaps add the Y axis checks
+    
+        // X AXIS CHECK
+        if( taverseAxis( coord, LFT, RIT, 0 ) ){
+            outColor = vec4( iOn );
+            return;
         }
 
-        if( !hasBak ) return; // Exit early on failure
-
-        // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-        // FORWARD ENTRANCE TEST
-        bool hasFwd = false;
-        for( int i = coord.z+1; i < vDimension.z; i++ ){
-            coord.z = i;
-            idx     = coordIdx( coord );
-            p       = texelFetch( tex, ivec2( 0, idx ), 0 );
-
-            if( p.a > 0.5 ){
-                if( dot( normalize( p.xyz ), vec3(0.,0.,1) ) > -0.1 ) hasFwd = true;
-                break;
-            }
+        // Z AXIS CHECK
+        if( taverseAxis( coord, BAK, FWD, 2 ) ){
+            outColor = vec4( iOn );
+            return;
         }
-
-        if( !hasFwd  ) return;
 
         // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
         // Success
-        outColor = vec4( iOn );
+        // outColor = vec4( iOn );
     }
 }`;
 

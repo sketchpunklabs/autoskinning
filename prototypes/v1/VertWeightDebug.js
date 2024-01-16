@@ -74,19 +74,23 @@ function debugWeightMaterial(){
         // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
         float wgt = getBoneWeight( boneIndex );
 
-        fragColor = mix(
-            vec3( 0.0, 1.0, 1.0 ),
-            vec3( 1.0, 0.0, 0.0 ),
-            wgt
-        );
+        // Simple Visualization
+        // fragColor = mix(
+        //     vec3( 0.0, 1.0, 1.0 ),
+        //     vec3( 1.0, 0.0, 0.0 ),
+        //     wgt
+        // );
 
-        // if( wgt > 0.5 ) fragColor = mix( green, red, wgt * 2.0 + 1.0 );
-        // else            fragColor = mix( blue, green, wgt * 2.0 );
+        // Visualize with 3 colors, Red:1, Green:0.5, Blue:0
+        if( wgt >= 0.5 ) fragColor = mix( green, red, wgt * 2.0 - 1.0 );    // Remap 0.5:1 to 0:1
+        else             fragColor = mix( blue, green, wgt * 2.0 );         // Remap 0:0.5 to 0:1
 
-        // if( wgt <= 0.0 ) fragColor = vec3( 1.0, 1.0, 1.0 );
+        // Visualize Weight very close to zero
+        if( wgt < 0.001 ) fragColor = vec3( 0.0, 0.0, 0.0 );
 
+        // Visualize Weight in the negative
+        // meaning bone has no assignment to this vert
         if( wgt < 0.0 ) fragColor = vec3( 1.0, 1.0, 0.0 );
-
 
         // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
         gl_Position = projectionMatrix * vPos;
