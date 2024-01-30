@@ -21,6 +21,20 @@ let Debug;
 // gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, width, height, gl.RGBA, gl.FLOAT, 0);
 // gl.bindBuffer(gl.PIXEL_UNPACK_BUFFER, null);
 
+
+// AI Says there is a way to transfer Tex to ArrayBuf
+// Create a texture object and upload some data to it
+// const texture = gl.createTexture();
+// gl.bindTexture(gl.TEXTURE_2D, texture);
+// gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 2, 2, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 0, 255, 255, 0, 255]));
+// // Create an array buffer to store the data
+// const pixelBuffer = gl.createBuffer();
+// // Read the data from the texture and store it in the array buffer
+// gl.bindBuffer(gl.ARRAY_BUFFER, pixelBuffer);
+// gl.readPixels(0, 0, 2, 2, gl.RGBA, gl.UNSIGNED_BYTE, 0);
+// // Print the data from the array buffer
+// console.log(new Uint8Array(gl.mapBuffer(gl.ARRAY_BUFFER, gl.READ_ONLY)));
+
 window.addEventListener( 'load', async _=>{
     // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
     // Setup
